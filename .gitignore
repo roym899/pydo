@@ -215,3 +215,8 @@ ModelManifest.xml
 # (because the source code is written such that it works perfectly fine with other IDEs or without an IDE at all)
 *.sln
 *.pyproj
+
+# Pycharm related
+.idea/
+pydo/client_secret.json
+quickstart.py
