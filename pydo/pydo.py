@@ -3,6 +3,7 @@ import datetime
 import httplib2
 import os
 import yaml
+import click
 
 from oauth2client.file import Storage
 from oauth2client import client
@@ -27,17 +28,27 @@ class Task:
         pass
 
 
+class TaskSpecifierParamType(click.ParamType):
+    name = 'task specifier'
+
+    def convert(self, value, param, ctx):
+        try:
+            # TODO: use regex to scan the task specifier
+            return Task("Workout", [])
+        except ValueError:
+            self.fail('%s is not a valid task specifier' % value)
+
+TASKSPECIFIER = TaskSpecifierParamType()
+
+
 class Planner:
     """Main class organizing the planning of the tasks """
     def __init__(self):
         self.tasks = []
         self.events = []
 
-    def add_task(self):
-        pass
-
-    def load_planner(self):
-        pass
+    def add_task(self, task):
+        self.tasks.append(task)
 
 
 class GoogleCalendarSync:
@@ -99,19 +110,60 @@ class GoogleCalendarSync:
             print(start, event['summary'])
 
 
-def main():
+def load_pydo_data():
+    """ Loads the pydo.yaml from ~/.pydo, and returns Planner object stored there"""
     home_dir = os.path.expanduser('~')
-    pydo_user_path = os.path.join(home_dir, 'pydo.yaml')
+    pydo_user_dir = os.path.join(home_dir, '.pydo')
+    if not os.path.exists(pydo_user_dir):
+        os.makedirs(pydo_user_dir)
+    pydo_user_path = os.path.join(pydo_user_dir, 'pydo.yaml')
     try:
         with open(pydo_user_path, 'r') as pydo_file:
-            planner = yaml.load(pydo_file)
+            return yaml.load(pydo_file)
     except IOError:
-        planner = Planner()
+        return Planner()
 
+
+def save_pydo_data(planner):
+    home_dir = os.path.expanduser('~')
+    pydo_user_dir = os.path.join(home_dir, '.pydo')
+    if not os.path.exists(pydo_user_dir):
+        os.makedirs(pydo_user_dir)
+    pydo_user_path = os.path.join(pydo_user_dir, 'pydo.yaml')
     with open(pydo_user_path, 'w') as pydo_file:
         yaml.dump(planner, pydo_file)
 
 
+@click.group(invoke_without_command=True)
+@click.pass_context
+def pydo(ctx):
+    """Todo App with optimized planning and google calendar integration"""
+    if ctx.invoked_subcommand is None:
+        print("Pydo without arguments will sync your data with google calendar, use --help for more information.")
+        print("Load pydo data...")
+
+        ctx.obj['planner'] = load_pydo_data()
+
+        # TODO: Sync with google calendar and show agenda
+        print("TODO: Sync with google calendar...")
+
+        print("Save pydo data...")
+        save_pydo_data(ctx.obj['planner'])
+    else:
+        print("Load pydo data...")
+        ctx.obj['planner'] = load_pydo_data()
+
+
+@pydo.command()
+@click.pass_context
+@click.argument('task', type=TASKSPECIFIER)
+def add(ctx, task):
+    """Add a task to pydo."""
+    planner = ctx.obj['planner']
+    planner.add_task(task)
+    save_pydo_data(planner)
+
+
 # start the actual program if the module is run by itself only
 if __name__ == '__main__':
-    main()
+    pydo(obj={})
