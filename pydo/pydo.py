@@ -4,6 +4,7 @@ import httplib2
 import os
 import yaml
 import click
+import regex
 
 from oauth2client.file import Storage
 from oauth2client import client
@@ -30,6 +31,32 @@ class Task:
 
 class TaskSpecifierParamType(click.ParamType):
     name = 'task specifier'
+    # in all strings which are formatted later regex' {...} must be replaced with {{...}}
+    duration = r"( *(for *)?((?P<{hours}>\d+) *h(our)?s?)(( *and *)?(?P<{minutes}>\d+) *m(in)?(ute)?s?)?| " \
+               r"*(for *)?((?P<{minutes}>\d+) *m(in)?(ute)?s?)(( *and *)?(?P<{hours}>\d+) *h(our)?s?)?)"
+    duration_no_params = r"( *(for *)?((?:\d+) *h(our)?s?)(( *and *)?(?:\d+) *m(in)?(ute)?s?)?| *(for *)?((?:\d+) " \
+                         r"*m(in)?(ute)?s?)(( *and *)?(?:\d+) *h(our)?s?)?)"
+    date = r"((?P<{day}>[0-3]?[0-9])[.-/](?P<{month}>[01]?[0-9])[./-]?(?P<{year}>\d{{4}})?|(?P<{year}>\d{{4}})[.-/]"  \
+           r"(?P<{month}>[01]?[0-9])[.-/](?P<{day}>[0-3]?[0-9])[./-]?)"
+    date_no_params = r"((?:[0-3]?[0-9])[.-/](?:[01]?[0-9])[./-]?(?:\d{4})?|(?:\d{4})[.-/](?:[01]?[0-9])[.-/]"  \
+                     r"(?:[0-3]?[0-9])[./-]?)"
+    time = r"((?P<{hour}>[01]?[0-9])(:(?P<{minute}>[0-6]?[0-9]))?(?P<{ampm}>am|pm)?)"
+    time_no_params = r"((?:[01]?[0-9])(:(?:[0-6]?[0-9]))?(?:am|pm)?)"
+    datespan = r"(( *(between *)?{start_date} *(and|-) *{end_date})|( *until *{end_date}))"\
+        .format(start_date=date.format(day=r"start_day", month=r"start_month", year=r"start_year"),
+                end_date=date.format(day=r"end_day", month=r"end_month", year=r"end_year"))
+    datespan_no_params = r"(( *(between *)?{date_no_params} *(and|-) *{date_no_params})|( *until *{date_no_params}))"
+    timespan = r"(( *(between *)?{start_time} *(and|-) *{end_time}))"\
+        .format(start_time=time.format(hour=r"start_hour", minute=r"start_minute", ampm=r"start_ampm"),
+                end_time=time.format(hour=r"end_hour", minute=r"end_minute", ampm=r"end_ampm"))
+    timespan_no_params = r"(( *(between *)?{time_no_params} *(and|-) *{time_no_params}))"
+    full_regex = r"({duration}|{datespan}|{timespan}| *(?P<description>.+?" \
+                 r"(?={duration_no_params}|{datespan_no_params}|{timespan_no_params}|$)))+"\
+        .format(duration=duration.format(hours="hours", minutes="minutes"), datespan=datespan, timespan=timespan,
+                duration_no_params=duration_no_params,
+                datespan_no_params=datespan_no_params.format(date_no_params=date_no_params),
+                timespan_no_params=timespan_no_params.format(time_no_params=time_no_params))
+    re = regex.compile(full_regex)
 
     def convert(self, value, param, ctx):
         try:
