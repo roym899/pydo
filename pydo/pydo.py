@@ -108,7 +108,38 @@ class Task:
     def __init__(self, description, constraints):
         self.description = description
         self.constraints = constraints
-        pass
+        self.identifier = None
+
+    def add_id(self, identifier):
+        self.identifier = identifier
+
+
+class Event:
+    """Minimal Representation of a event stored in google calendar"""
+    def __init__(self, description, start, end, identifier):
+        """start and end can be either date objects for full day events or datetime for timed events"""
+        self.description = description
+        self.start = start
+        self.end = end
+        self.identifier = identifier
+
+    def __unicode__(self):
+        if isinstance(self.start, datetime.datetime):
+            return u'{description}: {start} - {end} ({identifier})'.format(description=self.description,
+                                                                           start=self.start.strftime("%d.%m.%Y %H:%m"),
+                                                                           end=self.end.strftime("%d.%m.%Y %H:%m"),
+                                                                           identifier=self.identifier)
+        else:
+            return u'{description}: {start} - {end} ({identifier})'.format(description=self.description,
+                                                                           start=self.start.strftime("%d.%m.%Y"),
+                                                                           end=self.end.strftime("%d.%m.%Y"),
+                                                                           identifier=self.identifier)
+
+    def __str__(self):
+        return unicode(self).encode('utf-8')
+
+    def __repr__(self):
+        return self.__str__()
 
 
 class TaskSpecifierParamType(click.ParamType):
@@ -215,6 +246,12 @@ class Planner:
 
     def add_task(self, task):
         self.tasks.append(task)
+        # TODO: Fit task into google calendar
+
+    def sync_with_google_calendar(self):
+        syncer = GoogleCalendarSync()
+        # TODO: Read all events, compare with already known events, add new ones, reschedule tasks around it
+        self.events = syncer.get_events()
 
 
 class GoogleCalendarSync:
@@ -258,26 +295,45 @@ class GoogleCalendarSync:
         self._service = discovery.build('calendar', 'v3', http=http)
 
     def get_events(self):
-        now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
-        print('Getting the upcoming 10 events')
+        # always read everything 100days back in time, assumption: no one does anything relevant 100 days in the past
+        # with the assumption of planning approximately 1 month into the future those are 130 relevant days and with
+        # a maximum of 2500 results more 19 events per day which should normally be enough, especially if tasks are
+        # deleted and/or rescheduled
+
+        from_date = (datetime.datetime.utcnow()-datetime.timedelta(100)).isoformat() + 'Z'  # 'Z' indicates UTC time
         events_result = self._service.events().list(
-            calendarId='primary', timeMin=now, maxResults=2, singleEvents=True,
+            calendarId='primary', timeMin=from_date, maxResults=2500, singleEvents=True,
             orderBy='startTime').execute()
 
-        # print(eventsResult)
-        # print(json.dumps(events_result, sort_keys=True, indent=4))
+        full_events = events_result.get('items', [])
 
-        events = events_result.get('items', [])
+        if len(full_events) >= 2400:
+            print("Warning: {events} found. 2500 is the maximum. Reduce the time to look into the past, to ensure "
+                  "that the most relevant events are fetched")
 
-        if not events:
-            print('No upcoming events found.')
-        for event in events:
-            start = event['start'].get('dateTime', event['start'].get('date'))
-            print(start, event['summary'])
+        events = []
+
+        for full_event in full_events:
+            description = full_event["summary"]
+            start_date_str = full_event['start'].get('date')
+            start_datetime_str = full_event['start'].get('dateTime')
+            end_date_str = full_event['end'].get('date')
+            end_datetime_str = full_event['end'].get('dateTime')
+            start = datetime.datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_datetime_str is None else \
+                datetime.datetime.strptime(start_datetime_str[0:19], "%Y-%m-%dT%H:%M:%S")
+            end = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_datetime_str is None else \
+                datetime.datetime.strptime(end_datetime_str[0:19], "%Y-%m-%dT%H:%M:%S")
+            identifier = full_event["id"]
+
+            events.append(Event(description, start, end, identifier))
+
+        # print(events)
+        return events
 
 
 def load_pydo_data():
     """ Loads the pydo.yaml from ~/.pydo, and returns Planner object stored there"""
+    print("Load pydo data...")
     home_dir = os.path.expanduser('~')
     pydo_user_dir = os.path.join(home_dir, '.pydo')
     if not os.path.exists(pydo_user_dir):
@@ -291,6 +347,7 @@ def load_pydo_data():
 
 
 def save_pydo_data(planner):
+    print("Save pydo data...")
     home_dir = os.path.expanduser('~')
     pydo_user_dir = os.path.join(home_dir, '.pydo')
     if not os.path.exists(pydo_user_dir):
@@ -305,18 +362,15 @@ def save_pydo_data(planner):
 def pydo(ctx):
     """Todo App with optimized planning and google calendar integration"""
     if ctx.invoked_subcommand is None:
-        print("Pydo without arguments will sync your data with google calendar, use --help for more information.")
-        print("Load pydo data...")
+        print("Pydo without arguments will sync your data with google calendar and replan tasks if necessary, "  
+              "use --help for more information.")
 
-        ctx.obj['planner'] = load_pydo_data()
-
+        planner = load_pydo_data()
+        ctx.obj['planner'] = planner
         # TODO: Sync with google calendar and show agenda
-        print("TODO: Sync with google calendar...")
-
-        print("Save pydo data...")
-        save_pydo_data(ctx.obj['planner'])
+        planner.sync_with_google_calendar()
+        save_pydo_data(planner)
     else:
-        print("Load pydo data...")
         ctx.obj['planner'] = load_pydo_data()
 
 
