@@ -4,6 +4,7 @@ import httplib2
 import os
 import yaml
 import click
+import types
 import regex
 
 from oauth2client.file import Storage
@@ -12,11 +13,92 @@ from oauth2client import tools
 from apiclient import discovery
 
 
+def int_or_none(obj):
+    """Tries to convert object into an integer or returns None if not possible"""
+    try:
+        if isinstance(obj, types.StringTypes):
+            return int(obj)
+        elif isinstance(obj, list):
+            return int(obj[0])
+    except ValueError or TypeError:
+        return None
+
+
 class Constraint:
     """Abstract Base class for all constraints """
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
+    def get_constraint(self):
+        pass
+
+
+class DatespanConstraint(Constraint):
+    """Constraint for a task to be inbetween two specified days, if no start date is specified, now will be assumed"""
+    today = datetime.date.today()
+
+    def __init__(self, start_day, start_month, start_year, end_day, end_month, end_year):
+        if start_year is None:
+            start_year = DatespanConstraint.today.year
+        if end_year is None:
+            end_year = DatespanConstraint.today.year
+        if start_day is None:
+            start_day = DatespanConstraint.today.day
+            start_month = DatespanConstraint.today.month
+        if end_day is None or end_month is None:
+            raise ValueError("Datespan constraint not fully specified.")
+        self.start_date = datetime.date(start_year, start_month, start_day)
+        self.end_date = datetime.date(end_year, end_month, end_day)
+        if self.start_date > self.end_date:
+            raise ValueError("Startdate must be the same or before the Enddate")
+
+    def get_constraint(self):
+        pass
+
+
+class TimespanConstraint(Constraint):
+    """Constraint for a task to be inbetween two specified days, if no start date is specified, now will be assumed"""
+    today = datetime.date.today()
+
+    def __init__(self, start_hour, start_minute, start_ampm, end_hour, end_minute, end_ampm):
+        if start_hour is None or end_hour is None:
+            raise ValueError("Datespan constraint not fully specified.")
+        if start_minute is None:
+            start_minute = 0
+        if end_minute is None:
+            end_minute = 0
+        if start_ampm == "am" and start_hour == 12:
+            start_hour = 0
+        if start_ampm == "pm":
+            start_hour = start_hour+12 if start_hour != 12 else start_hour
+        if end_ampm == "am" and end_hour == 12:
+            end_hour = 0
+        if end_ampm == "pm":
+            end_hour = end_hour+12 if end_hour != 12 else end_hour
+        print(start_hour, end_hour)
+        self.start_time = datetime.time(start_hour, start_minute)
+        self.end_time = datetime.time(end_hour, end_minute)
+        if self.start_time >= self.end_time:
+            raise ValueError("Starttime must be before the Enddate")
+
+    def get_constraint(self):
+        pass
+
+
+class DurationConstraint(Constraint):
+    """Constraint for a task to be inbetween two specified days, if no start date is specified, now will be assumed"""
+    today = datetime.date.today()
+
+    def __init__(self, hours, minutes):
+        if hours is None:
+            hours = 0
+        elif minutes is None:
+            minutes = 0
+
+        self.minutes = hours*60+minutes
+        if self.minutes == 0:
+            raise ValueError("Duration constraint not fully specified.")
+
     def get_constraint(self):
         pass
 
@@ -60,10 +142,67 @@ class TaskSpecifierParamType(click.ParamType):
 
     def convert(self, value, param, ctx):
         try:
-            # TODO: use regex to scan the task specifier
-            return Task("Workout", [])
-        except ValueError:
-            self.fail('%s is not a valid task specifier' % value)
+            match = TaskSpecifierParamType.re.fullmatch(value)
+            (description, constraints) = TaskSpecifierParamType.extract_match(match)
+            return Task(description, constraints)
+        except ValueError as ve:
+            self.fail('%s is not a valid task specifier\n%s' % (value, ve.message))
+
+    @staticmethod
+    def extract_match(match):
+        # everything in the string has to be matched
+        if match is None:
+            raise ValueError("regex didn't result in a fullmatch.")
+
+        # there has to be a description
+        if len(match.captures("description")) > 1:
+            raise ValueError("description is not specified in one part")
+        if len(match.captures("description")) == 0:
+            raise ValueError("description is missing")
+
+        # no constraint may be defined twice
+        if len(match.captures("start_month")) > 1 or len(match.captures("start_year")) > 1 or\
+           len(match.captures("start_day")) > 1 or len(match.captures("end_month")) > 1 or\
+           len(match.captures("end_year")) > 1 or len(match.captures("end_day")) > 1:
+            raise ValueError("datespan is not clear")
+        if len(match.captures("start_hour")) > 1 or len(match.captures("start_minute")) > 1 or\
+           len(match.captures("start_ampm")) > 1 or len(match.captures("end_hour")) > 1 or\
+           len(match.captures("end_minute")) > 1 or len(match.captures("end_ampm")) > 1:
+            raise ValueError("timespan is not clear")
+        if len(match.captures("hours")) > 1 or len(match.captures("minutes")) > 1:
+            raise ValueError("duration is not clear")
+
+        # there has to be a duration
+        if len(match.captures("hours")) != 1 and len(match.captures("minutes")) != 1:
+            raise ValueError("duration is missing")
+
+        description = match.group("description")
+        constraints = []
+
+        if match.group("end_day") is not None:
+            datespan_constraint = DatespanConstraint(int_or_none(match.group("start_day")),
+                                                     int_or_none(match.group("start_month")),
+                                                     int_or_none(match.group("start_year")),
+                                                     int_or_none(match.group("end_day")),
+                                                     int_or_none(match.group("end_month")),
+                                                     int_or_none(match.group("end_year")))
+            constraints.append(datespan_constraint)
+
+        duration_constraint = DurationConstraint(int_or_none(match.group("hours")),
+                                                 int_or_none(match.group("minutes")))
+        constraints.append(duration_constraint)
+
+        if match.group("end_hour") is not None:
+            timespan_constraint = TimespanConstraint(int_or_none(match.group("start_hour")),
+                                                     int_or_none(match.group("start_minute")),
+                                                     match.group("start_ampm"),
+                                                     int_or_none(match.group("end_hour")),
+                                                     int_or_none(match.group("end_minute")),
+                                                     match.group("end_ampm"))
+            constraints.append(timespan_constraint)
+
+        return description, constraints
+
 
 TASKSPECIFIER = TaskSpecifierParamType()
 
