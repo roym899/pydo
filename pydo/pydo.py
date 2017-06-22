@@ -6,6 +6,7 @@ import yaml
 import click
 import types
 import regex
+from ortools.constraint_solver import pywrapcp
 
 from oauth2client.file import Storage
 from oauth2client import client
@@ -29,7 +30,7 @@ class Constraint:
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def get_constraint(self):
+    def add_constraint(self, solver, reference_time, events, time_opt_var, duration_opt_var):
         pass
 
 
@@ -52,12 +53,17 @@ class DatespanConstraint(Constraint):
         if self.start_date > self.end_date:
             raise ValueError("Startdate must be the same or before the Enddate")
 
-    def get_constraint(self):
-        pass
+    def add_constraint(self, solver, reference_time, events, time_opt_var, duration_opt_var):
+        start_stamp = int((datetime.datetime.combine(self.start_date, datetime.datetime.min.time())
+                           - reference_time).total_seconds()/60)
+        end_stamp = int((datetime.datetime.combine(self.end_date, datetime.datetime.max.time())
+                           - reference_time).total_seconds()/60)
+        solver.Add(time_opt_var + duration_opt_var <= end_stamp)
+        solver.Add(time_opt_var >= start_stamp)
 
 
 class TimespanConstraint(Constraint):
-    """Constraint for a task to be inbetween two specified days, if no start date is specified, now will be assumed"""
+    """Constraint for a task to be inbetween two specified times"""
     today = datetime.date.today()
 
     def __init__(self, start_hour, start_minute, start_ampm, end_hour, end_minute, end_ampm):
@@ -81,12 +87,16 @@ class TimespanConstraint(Constraint):
         if self.start_time >= self.end_time:
             raise ValueError("Starttime must be before the Enddate")
 
-    def get_constraint(self):
-        pass
+    def add_constraint(self, solver, reference_time, events, time_opt_var, duration_opt_var):
+        start_minutes = self.start_time.hour*60+self.start_time.minute
+        end_minutes = self.end_time.hour*60+self.end_time.minute
+        solver.Add((time_opt_var + duration_opt_var) % 1440 <= end_minutes)
+        solver.Add(time_opt_var % 1440 >= start_minutes)
+        solver.Add(time_opt_var % 1440 < (time_opt_var + duration_opt_var) % 1440)
 
 
 class DurationConstraint(Constraint):
-    """Constraint for a task to be inbetween two specified days, if no start date is specified, now will be assumed"""
+    """Constraint for a task to have an exact length"""
     today = datetime.date.today()
 
     def __init__(self, hours, minutes):
@@ -99,8 +109,12 @@ class DurationConstraint(Constraint):
         if self.minutes == 0:
             raise ValueError("Duration constraint not fully specified.")
 
-    def get_constraint(self):
-        pass
+    def add_constraint(self, solver, reference_time, events, time_opt_var, duration_opt_var):
+        for event in events:
+            solver.Add(solver.Max(time_opt_var+duration_opt_var <= event.start_timestamp(reference_time),
+                                  time_opt_var >= event.end_timestamp(reference_time)) == 1)
+
+        solver.Add(duration_opt_var == self.minutes)
 
 
 class Task:
@@ -134,6 +148,16 @@ class Event:
                                                                            start=self.start.strftime("%d.%m.%Y"),
                                                                            end=self.end.strftime("%d.%m.%Y"),
                                                                            identifier=self.identifier)
+
+    def start_timestamp(self, ref):
+        if isinstance(self.start, datetime.datetime):
+            return int((self.start-ref).total_seconds()/60)
+        return int((datetime.datetime.combine(self.start, datetime.datetime.min.time())-ref).total_seconds()/60)
+
+    def end_timestamp(self, ref):
+        if isinstance(self.end, datetime.datetime):
+            return int((self.end-ref).total_seconds()/60)
+        return int((datetime.datetime.combine(self.end, datetime.datetime.min.time())-ref).total_seconds()/60)
 
     def __str__(self):
         return unicode(self).encode('utf-8')
@@ -252,6 +276,34 @@ class Planner:
         syncer = GoogleCalendarSync()
         # TODO: Read all events, compare with already known events, add new ones, reschedule tasks around it
         self.events = syncer.get_events()
+
+    def plan_tasks(self):
+        """Use constraint optimization to find possible configuration fulfilling every constraint"""
+        solver = pywrapcp.Solver("task_optimization")
+        ref = datetime.datetime(2000, 1, 1, 0, 0, 0)
+        now = datetime.datetime.now()
+        minimum = int((now-ref).total_seconds()/60)
+        # minutes from now
+        t_start = solver.IntVar(minimum, minimum+144000, "t_start")
+        t_duration = solver.IntVar(0, 1440, "t_duration")
+        test_task = self.tasks[0]
+        for constraint in test_task.constraints:
+            constraint.add_constraint(solver=solver,
+                                      reference_time=ref,
+                                      events=self.events,
+                                      time_opt_var=t_start,
+                                      duration_opt_var=t_duration)
+
+        db = solver.Phase([t_start, t_duration], solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
+        solver.NewSearch(db)
+        solver.NextSolution()
+
+        delta = datetime.timedelta(minutes=t_start.Value())
+
+
+        print(ref+delta, t_start.Value(), t_duration.Value())
+        solver.EndSearch()
+
 
 
 class GoogleCalendarSync:
@@ -383,6 +435,15 @@ def add(ctx, task):
     planner.add_task(task)
     save_pydo_data(planner)
 
+
+@pydo.command()
+@click.pass_context
+def update(ctx):
+    """Runs the planner."""
+    planner = ctx.obj['planner']
+    planner.sync_with_google_calendar()
+    planner.plan_tasks()
+    save_pydo_data(planner)
 
 # start the actual program if the module is run by itself only
 if __name__ == '__main__':
