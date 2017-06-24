@@ -30,7 +30,7 @@ class Constraint:
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def add_constraint(self, solver, reference_time, events, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, reference_time, time_opt_var, duration_opt_var):
         pass
 
 
@@ -53,7 +53,7 @@ class DatespanConstraint(Constraint):
         if self.start_date > self.end_date:
             raise ValueError("Startdate must be the same or before the Enddate")
 
-    def add_constraint(self, solver, reference_time, events, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, reference_time, time_opt_var, duration_opt_var):
         start_stamp = int((datetime.datetime.combine(self.start_date, datetime.datetime.min.time())
                            - reference_time).total_seconds()/60)
         end_stamp = int((datetime.datetime.combine(self.end_date, datetime.datetime.max.time())
@@ -87,7 +87,7 @@ class TimespanConstraint(Constraint):
         if self.start_time >= self.end_time:
             raise ValueError("Starttime must be before the Enddate")
 
-    def add_constraint(self, solver, reference_time, events, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, reference_time, time_opt_var, duration_opt_var):
         start_minutes = self.start_time.hour*60+self.start_time.minute
         end_minutes = self.end_time.hour*60+self.end_time.minute
         solver.Add((time_opt_var + duration_opt_var) % 1440 <= end_minutes)
@@ -109,11 +109,7 @@ class DurationConstraint(Constraint):
         if self.minutes == 0:
             raise ValueError("Duration constraint not fully specified.")
 
-    def add_constraint(self, solver, reference_time, events, time_opt_var, duration_opt_var):
-        for event in events:
-            solver.Add(solver.Max(time_opt_var+duration_opt_var <= event.start_timestamp(reference_time),
-                                  time_opt_var >= event.end_timestamp(reference_time)) == 1)
-
+    def add_constraint(self, solver, reference_time, time_opt_var, duration_opt_var):
         solver.Add(duration_opt_var == self.minutes)
 
 
@@ -122,6 +118,8 @@ class Task:
     def __init__(self, description, constraints):
         self.description = description
         self.constraints = constraints
+        self.current_duration = None
+        self.current_timestamp = None
         self.identifier = None
 
     def add_id(self, identifier):
@@ -284,26 +282,48 @@ class Planner:
         now = datetime.datetime.now()
         minimum = int((now-ref).total_seconds()/60)
         # minutes from now
-        t_start = solver.IntVar(minimum, minimum+144000, "t_start")
-        t_duration = solver.IntVar(0, 1440, "t_duration")
-        test_task = self.tasks[0]
-        for constraint in test_task.constraints:
-            constraint.add_constraint(solver=solver,
-                                      reference_time=ref,
-                                      events=self.events,
-                                      time_opt_var=t_start,
-                                      duration_opt_var=t_duration)
+        task_number = 0
+        opt_starts = []
+        opt_durations = []
 
-        db = solver.Phase([t_start, t_duration], solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
+        # set up the optimization problem
+        for task in self.tasks:
+            opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number) )
+            opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
+            for constraint in task.constraints:
+                constraint.add_constraint(solver=solver,
+                                          reference_time=ref,
+                                          time_opt_var=opt_start,
+                                          duration_opt_var=opt_duration)
+
+            # no overlap with events from google calendar
+            for event in self.events:
+                solver.Add(solver.Max(opt_start + opt_duration <= event.start_timestamp(ref),
+                                      opt_start >= event.end_timestamp(ref)) == 1)
+
+            # no overlaps with other tasks
+            for prev_task_id in range(len(opt_starts)):
+                solver.Add(solver.Max(opt_start + opt_duration <= opt_starts[prev_task_id],
+                                      opt_start >= opt_starts[prev_task_id] + opt_durations[prev_task_id]) == 1)
+
+            opt_starts.append(opt_start)
+            opt_durations.append(opt_duration)
+            task_number += 1
+
+        # set the decision builder
+        db = solver.Phase(opt_starts + opt_durations, solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
+
+        # solve the problem
+        # TODO: enforce some timelimit on the optimization
         solver.NewSearch(db)
+
         solver.NextSolution()
 
-        delta = datetime.timedelta(minutes=t_start.Value())
+        for i in range(len(opt_starts)):
+            self.tasks[i].start = opt_starts[i].Value()
+            self.tasks[i].duration = opt_durations[i].Value()
 
-
-        print(ref+delta, t_start.Value(), t_duration.Value())
         solver.EndSearch()
-
 
 
 class GoogleCalendarSync:
