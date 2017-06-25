@@ -1,5 +1,6 @@
 ﻿import abc
 import datetime
+import time
 import httplib2
 import os
 import yaml
@@ -12,6 +13,9 @@ from oauth2client.file import Storage
 from oauth2client import client
 from oauth2client import tools
 from apiclient import discovery
+
+
+REFERENCE_TIME = datetime.datetime(2000, 1, 1, 0, 0, 0)
 
 
 def int_or_none(obj):
@@ -30,7 +34,7 @@ class Constraint:
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def add_constraint(self, solver, reference_time, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, time_opt_var, duration_opt_var):
         pass
 
 
@@ -53,11 +57,11 @@ class DatespanConstraint(Constraint):
         if self.start_date > self.end_date:
             raise ValueError("Startdate must be the same or before the Enddate")
 
-    def add_constraint(self, solver, reference_time, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, time_opt_var, duration_opt_var):
         start_stamp = int((datetime.datetime.combine(self.start_date, datetime.datetime.min.time())
-                           - reference_time).total_seconds()/60)
+                           - REFERENCE_TIME).total_seconds()/60)
         end_stamp = int((datetime.datetime.combine(self.end_date, datetime.datetime.max.time())
-                           - reference_time).total_seconds()/60)
+                           - REFERENCE_TIME).total_seconds()/60)
         solver.Add(time_opt_var + duration_opt_var <= end_stamp)
         solver.Add(time_opt_var >= start_stamp)
 
@@ -81,13 +85,12 @@ class TimespanConstraint(Constraint):
             end_hour = 0
         if end_ampm == "pm":
             end_hour = end_hour+12 if end_hour != 12 else end_hour
-        print(start_hour, end_hour)
         self.start_time = datetime.time(start_hour, start_minute)
         self.end_time = datetime.time(end_hour, end_minute)
         if self.start_time >= self.end_time:
             raise ValueError("Starttime must be before the Enddate")
 
-    def add_constraint(self, solver, reference_time, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, time_opt_var, duration_opt_var):
         start_minutes = self.start_time.hour*60+self.start_time.minute
         end_minutes = self.end_time.hour*60+self.end_time.minute
         solver.Add((time_opt_var + duration_opt_var) % 1440 <= end_minutes)
@@ -109,7 +112,7 @@ class DurationConstraint(Constraint):
         if self.minutes == 0:
             raise ValueError("Duration constraint not fully specified.")
 
-    def add_constraint(self, solver, reference_time, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, time_opt_var, duration_opt_var):
         solver.Add(duration_opt_var == self.minutes)
 
 
@@ -121,9 +124,31 @@ class Task:
         self.current_duration = None
         self.current_timestamp = None
         self.identifier = None
+        self.completed = False
+
+    def is_overdue(self):
+        if self.current_timestamp is None:
+            return False
+        if REFERENCE_TIME + datetime.timedelta(minutes=self.current_timestamp) < datetime.datetime.now():
+            return True
+        return False
 
     def add_id(self, identifier):
         self.identifier = identifier
+
+    def __unicode__(self):
+        return u'{description}: {current_timestamp} {current_duration} {completed} {identifier}'\
+            .format(description = self.description,
+                    current_timestamp = self.current_timestamp,
+                    current_duration = self.current_duration,
+                    completed=self.completed,
+                    identifier=self.identifier)
+
+    def __str__(self):
+        return unicode(self).encode('utf-8')
+
+    def __repr__(self):
+        return self.__str__()
 
 
 class Event:
@@ -147,15 +172,17 @@ class Event:
                                                                            end=self.end.strftime("%d.%m.%Y"),
                                                                            identifier=self.identifier)
 
-    def start_timestamp(self, ref):
+    def start_timestamp(self):
         if isinstance(self.start, datetime.datetime):
-            return int((self.start-ref).total_seconds()/60)
-        return int((datetime.datetime.combine(self.start, datetime.datetime.min.time())-ref).total_seconds()/60)
+            return int((self.start-REFERENCE_TIME).total_seconds()/60)
+        return int((datetime.datetime.combine(self.start, datetime.datetime.min.time())
+                    - REFERENCE_TIME).total_seconds()/60)
 
-    def end_timestamp(self, ref):
+    def end_timestamp(self):
         if isinstance(self.end, datetime.datetime):
-            return int((self.end-ref).total_seconds()/60)
-        return int((datetime.datetime.combine(self.end, datetime.datetime.min.time())-ref).total_seconds()/60)
+            return int((self.end-REFERENCE_TIME).total_seconds()/60)
+        return int((datetime.datetime.combine(self.end, datetime.datetime.min.time())
+                    - REFERENCE_TIME).total_seconds()/60)
 
     def __str__(self):
         return unicode(self).encode('utf-8')
@@ -273,45 +300,94 @@ class Planner:
     def sync_with_google_calendar(self):
         syncer = GoogleCalendarSync()
         # TODO: Read all events, compare with already known events, add new ones, reschedule tasks around it
-        self.events = syncer.get_events()
+        new_event = False
+        cal_events = syncer.get_cal_events()
+
+        for task in self.tasks:
+            if task.identifier is not None and task.completed is False:
+                task.completed = True
+
+        for cal_event in cal_events:
+            # first check if event is a task
+            task = next((task for task in self.tasks if task.identifier == cal_event.identifier), None)
+            if task is not None:
+                # replan overdue tasks
+                task.completed = False
+                if task.is_overdue():
+                    syncer.remove_task(task)
+                    task.identifier = None
+                    # TODO: handling for overdue tasks which can't be rescheduled to due constraints
+                continue
+
+            event = next((False for event in self.events if event.identifier == cal_event.identifier), None)
+            # add new events
+            if event is None:
+                # TODO: deleted events
+                self.events.append(event)
+                continue
+
+        # check for completed tasks -> all tasks which have an id and are completed
+        for task in self.tasks:
+            if task.completed and task.identifier is not None:
+                task.identifier = None
+
+        print(self.tasks)
+        print(self.events)
+
+        # replan the tasks
+        self.plan_tasks()
+
+        # add the tasks
+        syncer.add_tasks(self.tasks)
 
     def plan_tasks(self):
         """Use constraint optimization to find possible configuration fulfilling every constraint"""
         solver = pywrapcp.Solver("task_optimization")
-        ref = datetime.datetime(2000, 1, 1, 0, 0, 0)
         now = datetime.datetime.now()
-        minimum = int((now-ref).total_seconds()/60)
+        minimum = int((now-REFERENCE_TIME).total_seconds()/60)
         # minutes from now
         task_number = 0
-        opt_starts = []
-        opt_durations = []
+        opt_vars = []
+        optimizations = []
+        scheduled_tasks = [task for task in self.tasks if task.identifier is not None]
+        print(scheduled_tasks)
+        to_be_scheduled_tasks = [task for task in self.tasks if task.identifier is None and not task.completed]
+        print(to_be_scheduled_tasks)
 
         # set up the optimization problem
-        for task in self.tasks:
-            opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number) )
+        for task in to_be_scheduled_tasks:
+            # do not replan tasks
+
+            opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number))
             opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
             for constraint in task.constraints:
                 constraint.add_constraint(solver=solver,
-                                          reference_time=ref,
                                           time_opt_var=opt_start,
                                           duration_opt_var=opt_duration)
 
             # no overlap with events from google calendar
             for event in self.events:
-                solver.Add(solver.Max(opt_start + opt_duration <= event.start_timestamp(ref),
-                                      opt_start >= event.end_timestamp(ref)) == 1)
+                solver.Add(solver.Max(opt_start + opt_duration <= event.start_timestamp(),
+                                      opt_start >= event.end_timestamp()) == 1)
 
-            # no overlaps with other tasks
-            for prev_task_id in range(len(opt_starts)):
-                solver.Add(solver.Max(opt_start + opt_duration <= opt_starts[prev_task_id],
-                                      opt_start >= opt_starts[prev_task_id] + opt_durations[prev_task_id]) == 1)
+            # no overlaps with other to be optimized tasks
+            for prev_task_id in range(len(optimizations)):
+                solver.Add(solver.Max(opt_start + opt_duration <= optimizations[prev_task_id]['start'],
+                                      opt_start >= optimizations[prev_task_id]['start'] +
+                                      optimizations[prev_task_id]['duration']) == 1)
 
-            opt_starts.append(opt_start)
-            opt_durations.append(opt_duration)
+            # no overlaps with already scheduled tasks
+            for scheduled_task in scheduled_tasks:
+                solver.Add(solver.Max(opt_start + opt_duration <= scheduled_task.current_timestamp,
+                                      opt_start >= scheduled_task.current_timestamp +
+                                      scheduled_task.current_duration) == 1)
+
+            opt_vars += [opt_start, opt_duration]
+            optimizations.append({'start': opt_start, 'duration': opt_duration, 'task': task})
             task_number += 1
 
         # set the decision builder
-        db = solver.Phase(opt_starts + opt_durations, solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
+        db = solver.Phase(opt_vars, solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
 
         # solve the problem
         # TODO: enforce some timelimit on the optimization
@@ -319,9 +395,9 @@ class Planner:
 
         solver.NextSolution()
 
-        for i in range(len(opt_starts)):
-            self.tasks[i].start = opt_starts[i].Value()
-            self.tasks[i].duration = opt_durations[i].Value()
+        for optimization in optimizations:
+            optimization['task'].current_timestamp = optimization['start'].Value()
+            optimization['task'].current_duration = optimization['duration'].Value()
 
         solver.EndSearch()
 
@@ -366,7 +442,7 @@ class GoogleCalendarSync:
         http = credentials.authorize(httplib2.Http())
         self._service = discovery.build('calendar', 'v3', http=http)
 
-    def get_events(self):
+    def get_cal_events(self):
         # always read everything 100days back in time, assumption: no one does anything relevant 100 days in the past
         # with the assumption of planning approximately 1 month into the future those are 130 relevant days and with
         # a maximum of 2500 results more 19 events per day which should normally be enough, especially if tasks are
@@ -399,8 +475,49 @@ class GoogleCalendarSync:
 
             events.append(Event(description, start, end, identifier))
 
-        # print(events)
         return events
+
+    def add_tasks(self, tasks):
+        """Adds the passed task to google calendar"""
+        for task in tasks:
+            # only add scheduled tasks
+            if task.current_duration is None \
+                    or task.current_timestamp is None \
+                    or task.identifier is not None \
+                    or task.completed:
+                continue
+
+            # get time object for the current task starting time (for now assuming both are in the same timezone always)
+            start_time = REFERENCE_TIME + datetime.timedelta(minutes=task.current_timestamp)
+            end_time = REFERENCE_TIME + datetime.timedelta(minutes=task.current_timestamp+task.current_duration)
+            start_time_local = time.localtime(time.mktime(start_time.timetuple()))
+
+            # get timezone offset
+            is_dst = time.daylight and start_time_local.tm_isdst > 0
+            utc_offset = - (time.altzone if is_dst else time.timezone)
+            utc_offset_hour = int(utc_offset / 3600)
+            utc_offset_minutes = int((abs(utc_offset) % 3600) / 60)
+
+            # convert dates to strings
+            start_time_string = start_time.strftime("%Y-%m-%dT%H:%M:00") + "%+03d:%02d" % (utc_offset_hour,
+                                                                                           utc_offset_minutes)
+            end_time_string = end_time.strftime("%Y-%m-%dT%H:%M:00") + "%+03d:%02d" % (utc_offset_hour,
+                                                                                       utc_offset_minutes)
+
+            event = {
+                'summary': task.description,
+                'start': {
+                    'dateTime': start_time_string,
+                },
+                'end': {
+                    'dateTime': end_time_string,
+                }
+            }
+            event = self._service.events().insert(calendarId='primary', body=event).execute()
+            task.identifier = event['id']
+
+    def remove_task(self, task):
+        self._service.events().delete(calendarId='primary', eventId=task.identifier).execute()
 
 
 def load_pydo_data():
@@ -415,6 +532,7 @@ def load_pydo_data():
         with open(pydo_user_path, 'r') as pydo_file:
             return yaml.load(pydo_file)
     except IOError:
+        print("No pydo user file found, new one created.")
         return Planner()
 
 
@@ -455,15 +573,6 @@ def add(ctx, task):
     planner.add_task(task)
     save_pydo_data(planner)
 
-
-@pydo.command()
-@click.pass_context
-def update(ctx):
-    """Runs the planner."""
-    planner = ctx.obj['planner']
-    planner.sync_with_google_calendar()
-    planner.plan_tasks()
-    save_pydo_data(planner)
 
 # start the actual program if the module is run by itself only
 if __name__ == '__main__':
