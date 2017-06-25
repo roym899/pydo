@@ -212,12 +212,28 @@ class TaskSpecifierParamType(click.ParamType):
         .format(start_time=time.format(hour=r"start_hour", minute=r"start_minute", ampm=r"start_ampm"),
                 end_time=time.format(hour=r"end_hour", minute=r"end_minute", ampm=r"end_ampm"))
     timespan_no_params = r"(( *(between *)?{time_no_params} *(and|-) *{time_no_params}))"
-    full_regex = r"({duration}|{datespan}|{timespan}| *(?P<description>.+?" \
-                 r"(?={duration_no_params}|{datespan_no_params}|{timespan_no_params}|$)))+"\
+    long_duration = r"((?P<{days}>\d+)? *(?P<{kind}>d)(ay(s)?)?|(?P<{weeks}>\d+)? *(?P<{kind}>w)(eek(s)?)?|" \
+                    r"(?P<{months}>\d+)? *(?P<{kind}>m)(onth(s)?)?|(?P<{years}>\d+)? *(?P<{kind}>y)(ear(s)?))?"\
+        .format(days="rep_days", weeks="rep_weeks", months="rep_months", years="rep_years", kind="rep_kind")
+    long_duration_no_params = r"((?:\d+)? *(?:d)(ay(s)?)?|(?:\d+)? *(?:w)(eek(s)?)?|" \
+                              r"(?:\d+)? *(?:m)(onth(s)?)?|(?:\d+)? *(?:y)(ear(s)?))?"\
+        .format(days="rep_days", weeks="rep_weeks", months="rep_months", years="rep_years", kind="rep_kind")
+    repetition = r"( *every *{long_duration}( *(?P<{scheduling}>after *completion|in *general))?)"\
+        .format(long_duration=long_duration, scheduling="rep_scheduling")
+    repetition_no_params = r"( *every *{long_duration_no_params}( *(?:after *completion|in *general))?)"\
+        .format(long_duration_no_params=long_duration_no_params)
+    overdue_behaviour = r"( *(as)? *(?P<{overdue}>optional|mandatory))"\
+        .format(overdue="overdue")
+    overdue_behaviour_no_params = r"( *(as)? *(?:optional|mandatory))"
+    full_regex = r"({duration}|{datespan}|{timespan}|{repetition}|{overdue_behaviour}| *(?P<description>.+?"\
+                 r"(?={duration_no_params}|{datespan_no_params}|{timespan_no_params}|{repetition_no_params}|"\
+                 r"{overdue_behaviour_no_params}|$)))+"\
         .format(duration=duration.format(hours="hours", minutes="minutes"), datespan=datespan, timespan=timespan,
+                repetition=repetition, overdue_behaviour=overdue_behaviour,
                 duration_no_params=duration_no_params,
                 datespan_no_params=datespan_no_params.format(date_no_params=date_no_params),
-                timespan_no_params=timespan_no_params.format(time_no_params=time_no_params))
+                timespan_no_params=timespan_no_params.format(time_no_params=time_no_params),
+                repetition_no_params=repetition_no_params, overdue_behaviour_no_params=overdue_behaviour_no_params)
     re = regex.compile(full_regex)
 
     def convert(self, value, param, ctx):
@@ -281,6 +297,9 @@ class TaskSpecifierParamType(click.ParamType):
                                                      match.group("end_ampm"))
             constraints.append(timespan_constraint)
 
+        if match.group("rep_kind") is not None:
+            print("test")
+
         return description, constraints
 
 
@@ -331,9 +350,6 @@ class Planner:
             if task.completed and task.identifier is not None:
                 task.identifier = None
 
-        print(self.tasks)
-        print(self.events)
-
         # replan the tasks
         self.plan_tasks()
 
@@ -350,14 +366,10 @@ class Planner:
         opt_vars = []
         optimizations = []
         scheduled_tasks = [task for task in self.tasks if task.identifier is not None]
-        print(scheduled_tasks)
         to_be_scheduled_tasks = [task for task in self.tasks if task.identifier is None and not task.completed]
-        print(to_be_scheduled_tasks)
 
         # set up the optimization problem
         for task in to_be_scheduled_tasks:
-            # do not replan tasks
-
             opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number))
             opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
             for constraint in task.constraints:
