@@ -202,8 +202,8 @@ class TaskSpecifierParamType(click.ParamType):
            r"(?P<{month}>[01]?[0-9])[.-/](?P<{day}>[0-3]?[0-9])[./-]?)"
     date_no_params = r"((?:[0-3]?[0-9])[.-/](?:[01]?[0-9])[./-]?(?:\d{4})?|(?:\d{4})[.-/](?:[01]?[0-9])[.-/]"  \
                      r"(?:[0-3]?[0-9])[./-]?)"
-    time = r"((?P<{hour}>[01]?[0-9])(:(?P<{minute}>[0-6]?[0-9]))?(?P<{ampm}>am|pm)?)"
-    time_no_params = r"((?:[01]?[0-9])(:(?:[0-6]?[0-9]))?(?:am|pm)?)"
+    time = r"((?P<{hour}>[012]?[0-9])(:(?P<{minute}>[0-6]?[0-9]))?(?P<{ampm}>am|pm)?)"
+    time_no_params = r"((?:[012]?[0-9])(:(?:[0-6]?[0-9]))?(?:am|pm)?)"
     datespan = r"(( *(between *)?{start_date} *(and|-) *{end_date})|( *until *{end_date}))"\
         .format(start_date=date.format(day=r"start_day", month=r"start_month", year=r"start_year"),
                 end_date=date.format(day=r"end_day", month=r"end_month", year=r"end_year"))
