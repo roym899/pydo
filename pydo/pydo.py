@@ -121,28 +121,57 @@ class Task:
     def __init__(self, description, constraints):
         self.description = description
         self.constraints = constraints
-        self.current_duration = None
-        self.current_timestamp = None
-        self.identifier = None
-        self.completed = False
+        self.subtasks = []
+        self.subtasks.append({'identifier': None, 'completed': False, 'current_timestamp': None, 'current_duration': None})
+        self.recurring = None
+
+    def is_recurring(self):
+        if not self.recurring:
+            return False
+        else:
+            return True
 
     def is_overdue(self):
-        if self.current_timestamp is None:
-            return False
-        if REFERENCE_TIME + datetime.timedelta(minutes=self.current_timestamp) < datetime.datetime.now():
-            return True
-        return False
+        """Returns a list of True and False depending on which timestamps have passed already"""
+        if len(self.subtasks) == 0:
+            return [False]
 
-    def add_id(self, identifier):
-        self.identifier = identifier
+        return [REFERENCE_TIME + datetime.timedelta(minutes=subtask['current_timestamp']) < datetime.datetime.now()
+                for subtask in self.subtasks]
+
+    def add_id(self, identifier, subtask_number):
+        self.subtasks[subtask_number]['identifier'] = identifier
+
+    def add_to_solver(self, solver, task_number):
+        """Adds the task and its inherent constraints to the solver, returns object including the optimization
+        variables"""
+        if self.subtasks[0]['identifier'] is None and not self.subtasks[0]['completed']:
+            now = datetime.datetime.now()
+            minimum = int((now-REFERENCE_TIME).total_seconds()/60)
+            opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number))
+            opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
+            for constraint in self.constraints:
+                constraint.add_constraint(solver=solver,
+                                          time_opt_var=opt_start,
+                                          duration_opt_var=opt_duration)
+
+            optimization = {'start': opt_start,
+                            'duration': opt_duration,
+                            'task': self,
+                            'subtask_number': 0}
+
+            return [optimization]
+        else:
+            return []
+
 
     def __unicode__(self):
-        return u'{description}: {current_timestamp} {current_duration} {completed} {identifier}'\
-            .format(description = self.description,
-                    current_timestamp = self.current_timestamp,
-                    current_duration = self.current_duration,
-                    completed=self.completed,
-                    identifier=self.identifier)
+        return u'{description}: {current_timestamps} {current_durations} {completed} {identifier}'\
+            .format(description=self.description,
+                    current_timestamps=[subtask['current_timestamp'] for subtask in self.subtasks],
+                    current_durations=[subtask['current_duration'] for subtask in self.subtasks],
+                    completed=[subtask['completed'] for subtask in self.subtasks],
+                    identifier=[subtask['identifier'] for subtask in self.subtasks])
 
     def __str__(self):
         return unicode(self).encode('utf-8')
@@ -322,33 +351,36 @@ class Planner:
         new_event = False
         cal_events = syncer.get_cal_events()
 
-        for task in self.tasks:
-            if task.identifier is not None and task.completed is False:
-                task.completed = True
+        nonrecurring_tasks = [task for task in self.tasks if not task.is_recurring()]
+
+        for task in nonrecurring_tasks:
+            if task.subtasks[0]['identifier'] is not None and task.subtasks[0]['completed'] is False:
+                task.subtasks[0]['completed'] = True
 
         for cal_event in cal_events:
             # first check if event is a task
-            task = next((task for task in self.tasks if task.identifier == cal_event.identifier), None)
+            task = next((task for task in nonrecurring_tasks if task.subtasks[0]['identifier'] == cal_event.identifier),
+                        None)
             if task is not None:
                 # replan overdue tasks
-                task.completed = False
-                if task.is_overdue():
+                task.subtasks[0]['completed'] = False
+                if (task.is_overdue())[0]:
                     syncer.remove_task(task)
-                    task.identifier = None
-                    # TODO: handling for overdue tasks which can't be rescheduled to due constraints
+                    task.subtasks[0]['identifier'] = None
+                    # TODO: handling for overdue tasks which can't be rescheduled due to constraints
                 continue
 
-            event = next((False for event in self.events if event.identifier == cal_event.identifier), None)
+            event = next((event for event in self.events if event.identifier == cal_event.identifier), None)
             # add new events
             if event is None:
                 # TODO: deleted events
-                self.events.append(event)
+                self.events.append(cal_event)
                 continue
 
         # check for completed tasks -> all tasks which have an id and are completed
-        for task in self.tasks:
-            if task.completed and task.identifier is not None:
-                task.identifier = None
+        for task in nonrecurring_tasks:
+            if task.subtasks[0]['completed'] and task.subtasks[0]['identifier'] is not None:
+                task.subtasks[0]['identifier'] = None
 
         # replan the tasks
         self.plan_tasks()
@@ -359,44 +391,41 @@ class Planner:
     def plan_tasks(self):
         """Use constraint optimization to find possible configuration fulfilling every constraint"""
         solver = pywrapcp.Solver("task_optimization")
-        now = datetime.datetime.now()
-        minimum = int((now-REFERENCE_TIME).total_seconds()/60)
         # minutes from now
         task_number = 0
         opt_vars = []
         optimizations = []
-        scheduled_tasks = [task for task in self.tasks if task.identifier is not None]
-        to_be_scheduled_tasks = [task for task in self.tasks if task.identifier is None and not task.completed]
+        scheduled_subtasks = [subtask for task in self.tasks for subtask in task.subtasks
+                              if subtask['identifier'] is not None]
 
         # set up the optimization problem
-        for task in to_be_scheduled_tasks:
-            opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number))
-            opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
-            for constraint in task.constraints:
-                constraint.add_constraint(solver=solver,
-                                          time_opt_var=opt_start,
-                                          duration_opt_var=opt_duration)
+        for task in self.tasks:
+            new_optimizations = task.add_to_solver(solver, task_number)
 
-            # no overlap with events from google calendar
-            for event in self.events:
-                solver.Add(solver.Max(opt_start + opt_duration <= event.start_timestamp(),
-                                      opt_start >= event.end_timestamp()) == 1)
+            for optimization in new_optimizations:
+                # no overlap with events from google calendar
+                opt_start = optimization['start']
+                opt_duration = optimization['duration']
+                for event in self.events:
+                    solver.Add(solver.Max(opt_start + opt_duration <= event.start_timestamp(),
+                                          opt_start >= event.end_timestamp()) == 1)
 
-            # no overlaps with other to be optimized tasks
-            for prev_task_id in range(len(optimizations)):
-                solver.Add(solver.Max(opt_start + opt_duration <= optimizations[prev_task_id]['start'],
-                                      opt_start >= optimizations[prev_task_id]['start'] +
-                                      optimizations[prev_task_id]['duration']) == 1)
+                # no overlaps with other to be optimized tasks
+                for prev_task_id in range(len(optimizations)):
+                    solver.Add(solver.Max(opt_start + opt_duration <= optimizations[prev_task_id]['start'],
+                                          opt_start >= optimizations[prev_task_id]['start'] +
+                                          optimizations[prev_task_id]['duration']) == 1)
 
-            # no overlaps with already scheduled tasks
-            for scheduled_task in scheduled_tasks:
-                solver.Add(solver.Max(opt_start + opt_duration <= scheduled_task.current_timestamp,
-                                      opt_start >= scheduled_task.current_timestamp +
-                                      scheduled_task.current_duration) == 1)
+                # no overlaps with already scheduled tasks
+                for scheduled_subtask in scheduled_subtasks:
+                    solver.Add(solver.Max(opt_start + opt_duration <= scheduled_subtask['current_timestamp'],
+                                          opt_start >= scheduled_subtask['current_timestamp'] +
+                                          scheduled_subtask['current_duration']) == 1)
 
-            opt_vars += [opt_start, opt_duration]
-            optimizations.append({'start': opt_start, 'duration': opt_duration, 'task': task})
-            task_number += 1
+                opt_vars += [opt_start, opt_duration]
+                optimizations.append(optimization)
+
+            task_number += len(new_optimizations)
 
         # set the decision builder
         db = solver.Phase(opt_vars, solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
@@ -408,8 +437,9 @@ class Planner:
         solver.NextSolution()
 
         for optimization in optimizations:
-            optimization['task'].current_timestamp = optimization['start'].Value()
-            optimization['task'].current_duration = optimization['duration'].Value()
+            subtask_number = optimization['subtask_number']
+            optimization['task'].subtasks[subtask_number]['current_timestamp'] = optimization['start'].Value()
+            optimization['task'].subtasks[subtask_number]['current_duration'] = optimization['duration'].Value()
 
         solver.EndSearch()
 
@@ -492,41 +522,44 @@ class GoogleCalendarSync:
     def add_tasks(self, tasks):
         """Adds the passed task to google calendar"""
         for task in tasks:
-            # only add scheduled tasks
-            if task.current_duration is None \
-                    or task.current_timestamp is None \
-                    or task.identifier is not None \
-                    or task.completed:
-                continue
+            for subtask in task.subtasks:
+                # only add scheduled tasks
+                if subtask['current_duration'] is None \
+                        or subtask['current_timestamp'] is None \
+                        or subtask['identifier'] is not None \
+                        or subtask['completed']:
+                    continue
 
-            # get time object for the current task starting time (for now assuming both are in the same timezone always)
-            start_time = REFERENCE_TIME + datetime.timedelta(minutes=task.current_timestamp)
-            end_time = REFERENCE_TIME + datetime.timedelta(minutes=task.current_timestamp+task.current_duration)
-            start_time_local = time.localtime(time.mktime(start_time.timetuple()))
+                # get time object for the current task starting time
+                # (for now assuming both are in the same timezone always)
+                start_time = REFERENCE_TIME + datetime.timedelta(minutes=subtask['current_timestamp'])
+                end_time = REFERENCE_TIME + datetime.timedelta(minutes=subtask['current_timestamp']+
+                                                                       subtask['current_duration'])
+                start_time_local = time.localtime(time.mktime(start_time.timetuple()))
 
-            # get timezone offset
-            is_dst = time.daylight and start_time_local.tm_isdst > 0
-            utc_offset = - (time.altzone if is_dst else time.timezone)
-            utc_offset_hour = int(utc_offset / 3600)
-            utc_offset_minutes = int((abs(utc_offset) % 3600) / 60)
+                # get timezone offset
+                is_dst = time.daylight and start_time_local.tm_isdst > 0
+                utc_offset = - (time.altzone if is_dst else time.timezone)
+                utc_offset_hour = int(utc_offset / 3600)
+                utc_offset_minutes = int((abs(utc_offset) % 3600) / 60)
 
-            # convert dates to strings
-            start_time_string = start_time.strftime("%Y-%m-%dT%H:%M:00") + "%+03d:%02d" % (utc_offset_hour,
+                # convert dates to strings
+                start_time_string = start_time.strftime("%Y-%m-%dT%H:%M:00") + "%+03d:%02d" % (utc_offset_hour,
+                                                                                               utc_offset_minutes)
+                end_time_string = end_time.strftime("%Y-%m-%dT%H:%M:00") + "%+03d:%02d" % (utc_offset_hour,
                                                                                            utc_offset_minutes)
-            end_time_string = end_time.strftime("%Y-%m-%dT%H:%M:00") + "%+03d:%02d" % (utc_offset_hour,
-                                                                                       utc_offset_minutes)
 
-            event = {
-                'summary': task.description,
-                'start': {
-                    'dateTime': start_time_string,
-                },
-                'end': {
-                    'dateTime': end_time_string,
+                event = {
+                    'summary': task.description,
+                    'start': {
+                        'dateTime': start_time_string,
+                    },
+                    'end': {
+                        'dateTime': end_time_string,
+                    }
                 }
-            }
-            event = self._service.events().insert(calendarId='primary', body=event).execute()
-            task.identifier = event['id']
+                event = self._service.events().insert(calendarId='primary', body=event).execute()
+                subtask['identifier'] = event['id']
 
     def remove_task(self, task):
         self._service.events().delete(calendarId='primary', eventId=task.identifier).execute()
