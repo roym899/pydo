@@ -118,18 +118,25 @@ class DurationConstraint(Constraint):
 
 class Task:
     """Representation of a task """
-    def __init__(self, description, constraints):
+    def __init__(self, description, constraints, recurring=None, overdue_behaviour='mandatory'):
         self.description = description
         self.constraints = constraints
         self.subtasks = []
-        self.subtasks.append({'identifier': None, 'completed': False, 'current_timestamp': None, 'current_duration': None})
-        self.recurring = None
+        if recurring is None:
+            self.subtasks.append({'identifier': None, 'completed': False, 'current_timestamp': None, 'current_duration': None})
+        self.recurring = recurring
+        self.overdue_behaviour = overdue_behaviour
+
 
     def is_recurring(self):
         if not self.recurring:
             return False
         else:
             return True
+
+    @staticmethod
+    def is_subtask_overdue(subtask):
+        return REFERENCE_TIME + datetime.timedelta(minutes=subtask['current_timestamp']) < datetime.datetime.now()
 
     def is_overdue(self):
         """Returns a list of True and False depending on which timestamps have passed already"""
@@ -142,27 +149,77 @@ class Task:
     def add_id(self, identifier, subtask_number):
         self.subtasks[subtask_number]['identifier'] = identifier
 
+    def to_be_scheduled_tasks(self):
+        """Generates the number of tasks to be scheduled at any time"""
+
+        # non recurring tasks are always scheduled once at max
+        if not self.is_recurring():
+            return 1
+        # recurring tasks are scheduled depending on the recurring time frame
+        else:
+            # get approximate days between two events
+            if self.recurring['kind'] == 'days':
+                approx_days = self.recurring['amount']
+            else:
+                approx_days = 30*self.recurring['amount']
+
+            # 7 events for daily tasks, 2 are minimum for yearly tasks, monthly ~3
+            number_of_tasks = int(round(-5*(1-pow(2, (-approx_days+1)/30))+7))
+            return number_of_tasks
+
+
     def add_to_solver(self, solver, task_number):
         """Adds the task and its inherent constraints to the solver, returns object including the optimization
         variables"""
-        if self.subtasks[0]['identifier'] is None and not self.subtasks[0]['completed']:
-            now = datetime.datetime.now()
-            minimum = int((now-REFERENCE_TIME).total_seconds()/60)
-            opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number))
-            opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
-            for constraint in self.constraints:
-                constraint.add_constraint(solver=solver,
-                                          time_opt_var=opt_start,
-                                          duration_opt_var=opt_duration)
+        if self.is_recurring():
+            scheduled_tasks = 0
+            subtask_id = 0
+            while scheduled_tasks < self.to_be_scheduled_tasks():
+                if subtask_id < len(self.subtasks):
+                    # check already created subtasks
+                    if self.subtasks[subtask_id]['completed']:
+                        # ignore completed task
+                        last_completed_subtask = self.subtasks[subtask_id]['completed']
+                    elif self.subtasks[subtask_id]['identifier'] is not None and Task.is_subtask_overdue(self.subtasks[subtask_id]):
+                        # to be scheduled task, should actually never happen
+                        print("Error: add_to_solver: non completed non scheduled task found")
+                        exit()
+                    elif Task.is_subtask_overdue(self.subtasks[subtask_id]):
+                        # non completed and overdue task
+                        # TODO: add correct overdue handling here
+                        # if overdue behaviour is optional, the non completed task won't be scheduled anymore
+                        if self.overdue_behaviour == 'optional':
 
-            optimization = {'start': opt_start,
-                            'duration': opt_duration,
-                            'task': self,
-                            'subtask_number': 0}
+                        # if scheduling is in general, non overdue tasks can stay like they are
 
-            return [optimization]
+                        # if scheduling is after completion, all tasks have to be rescheduled according to the first overdue task
+                        pass
+                    else:
+                        pass
+                else:
+                    # new subtasks have to be created
+                    pass
+                subtask_id += 1
+
         else:
-            return []
+            if self.subtasks[0]['identifier'] is None and not self.subtasks[0]['completed']:
+                now = datetime.datetime.now()
+                minimum = int((now-REFERENCE_TIME).total_seconds()/60)
+                opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number))
+                opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
+                for constraint in self.constraints:
+                    constraint.add_constraint(solver=solver,
+                                              time_opt_var=opt_start,
+                                              duration_opt_var=opt_duration)
+
+                optimization = {'start': opt_start,
+                                'duration': opt_duration,
+                                'task': self,
+                                'subtask_number': 0}
+
+                return [optimization]
+            else:
+                return []
 
 
     def __unicode__(self):
@@ -246,7 +303,7 @@ class TaskSpecifierParamType(click.ParamType):
         .format(days="rep_days", weeks="rep_weeks", months="rep_months", years="rep_years", kind="rep_kind")
     long_duration_no_params = r"((?:\d+)? *(?:d)(ay(s)?)?|(?:\d+)? *(?:w)(eek(s)?)?|" \
                               r"(?:\d+)? *(?:m)(onth(s)?)?|(?:\d+)? *(?:y)(ear(s)?))?"\
-        .format(days="rep_days", weeks="rep_weeks", months="rep_months", years="rep_years", kind="rep_kind")
+        .format(days="rep_amount", weeks="rep_amount", months="rep_amount", years="rep_amount", kind="rep_kind")
     repetition = r"( *every *{long_duration}( *(?P<{scheduling}>after *completion|in *general))?)"\
         .format(long_duration=long_duration, scheduling="rep_scheduling")
     repetition_no_params = r"( *every *{long_duration_no_params}( *(?:after *completion|in *general))?)"\
@@ -327,9 +384,73 @@ class TaskSpecifierParamType(click.ParamType):
             constraints.append(timespan_constraint)
 
         if match.group("rep_kind") is not None:
-            print("test")
+            recurring = {}
+            if match.group("rep_kind") == 'd' or match.group("rep_kind") == 'w':
+                # days or weeks are mostly handled the same with week just being days
+                recurring['kind'] = 'days'
+                if match.group("rep_kind") == 'w':
+                    multiplier = 7
+                else:
+                    multiplier = 1
+                if match.group("rep_amount") is not None:
+                    recurring['amount'] = int(match.group("rep_amount")) * multiplier
+                else:
+                    recurring['amound'] = 1
+            elif match.group("rep_kind") == 'm' or match.group("rep_kind") == "y":
+                # years and months are handled the same with year just being 12 months
+                # the difference to days is that month and year repetition bind to a date rather than a number of days
+                # eg. scheduling every month on the 31.03 will create a task every last day of the month
+                # problem with 30 days e.g. would be that the actual date drifts off over time
+                recurring['kind'] = 'months'
+                today = datetime.datetime.utcnow().date()
+                if today.day <= 27:
+                    # normal day which can be handled the same for every month
+                    recurring['date'] = datetime.datetime.utcnow().day
+                elif today.month == 1 or today.month == 3 or today.month == 5 or today.month == 7 or today.month == 8\
+                    or today.month == 10 or today.month == 12:
+                    # month has 31 days
+                    recurring['date'] = today.day - 31 - 1
+                elif today.month == 2 and today.day >= 28:
+                    # month is february, regard 28th and 29th as last day of every month
+                    recurring['date'] = -1
+                else:
+                    # month has 30 days
+                    recurring['date'] = today.day - 30 - 1
 
-        return description, constraints
+                if match.group("rep_kind") == 'y':
+                    multiplier = 12
+                else:
+                    multiplier = 1
+                if match.group("rep_amount") is not None:
+                    recurring['amount'] = int(match.group("rep_amount")) * multiplier
+                else:
+                    recurring['amound'] = 1
+
+
+
+            if match.group("rep_scheduling") is not None:
+                if match.group("rep_scheduling")[0] == 'a':
+                    # after completion
+                    recurring['scheduling'] = 'after_completion'
+                elif match.group("rep_scheduling")[0] == "i":
+                    # in general
+                    recurring['scheduling'] = 'in_general'
+                else:
+                    print("Error: rep_scheduling was found but with unknown identifier")
+            else:
+                recurring['scheduling'] = 'in_general'
+
+        else:
+            recurring = None
+
+        if match.group("overdue") is not None:
+            overdue_behaviour = match.group("overdue")
+        else:
+            overdue_behaviour = 'mandatory'
+
+        # TODO: think about wether all 4 combinations of overdue_behaviour and recurring scheduling make sense otherwise check for it
+
+        return description, constraints, recurring, overdue_behaviour
 
 
 TASKSPECIFIER = TaskSpecifierParamType()
@@ -352,22 +473,24 @@ class Planner:
         cal_events = syncer.get_cal_events()
 
         nonrecurring_tasks = [task for task in self.tasks if not task.is_recurring()]
+        subtasks = [subtask for task in self.tasks for subtask in task.subtasks]
 
-        for task in nonrecurring_tasks:
-            if task.subtasks[0]['identifier'] is not None and task.subtasks[0]['completed'] is False:
-                task.subtasks[0]['completed'] = True
+        for subtask in subtasks:
+            if subtask['identifier'] is not None and subtask['completed'] is False:
+                subtask['completed'] = True
 
         for cal_event in cal_events:
             # first check if event is a task
-            task = next((task for task in nonrecurring_tasks if task.subtasks[0]['identifier'] == cal_event.identifier),
-                        None)
-            if task is not None:
+            matched_subtask = next((subtask for subtask in subtasks if subtask['identifier'] == cal_event.identifier),
+                                   None)
+            if matched_subtask is not None:
                 # replan overdue tasks
-                task.subtasks[0]['completed'] = False
-                if (task.is_overdue())[0]:
-                    syncer.remove_task(task)
-                    task.subtasks[0]['identifier'] = None
-                    # TODO: handling for overdue tasks which can't be rescheduled due to constraints
+                # TODO: handling of overdue tasks should be done in plan_tasks and add_to_solver
+                # TODO: handling for overdue tasks which can't be rescheduled due to constraints
+                matched_subtask['completed'] = False
+                if (Task.is_subtask_overdue(matched_subtask)):
+                    syncer.remove_subtask(matched_subtask)
+                    matched_subtask['identifier'] = None
                 continue
 
             event = next((event for event in self.events if event.identifier == cal_event.identifier), None)
@@ -378,9 +501,9 @@ class Planner:
                 continue
 
         # check for completed tasks -> all tasks which have an id and are completed
-        for task in nonrecurring_tasks:
-            if task.subtasks[0]['completed'] and task.subtasks[0]['identifier'] is not None:
-                task.subtasks[0]['identifier'] = None
+        for subtask in subtasks:
+            if subtask['completed'] and subtask['identifier'] is not None:
+                subtask['identifier'] = None
 
         # replan the tasks
         self.plan_tasks()
@@ -561,8 +684,8 @@ class GoogleCalendarSync:
                 event = self._service.events().insert(calendarId='primary', body=event).execute()
                 subtask['identifier'] = event['id']
 
-    def remove_task(self, task):
-        self._service.events().delete(calendarId='primary', eventId=task.identifier).execute()
+    def remove_subtask(self, subtask):
+        self._service.events().delete(calendarId='primary', eventId=subtask['identifier']).execute()
 
 
 def load_pydo_data():
