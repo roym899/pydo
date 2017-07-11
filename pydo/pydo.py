@@ -167,10 +167,10 @@ class Task:
             number_of_tasks = int(round(-5*(1-pow(2, (-approx_days+1)/30))+7))
             return number_of_tasks
 
-
     def add_to_solver(self, solver, task_number):
         """Adds the task and its inherent constraints to the solver, returns object including the optimization
         variables"""
+        optimizations = []
         if self.is_recurring():
             scheduled_tasks = 0
             subtask_id = 0
@@ -182,26 +182,82 @@ class Task:
                         last_completed_subtask = self.subtasks[subtask_id]['completed']
                     elif self.subtasks[subtask_id]['identifier'] is not None and Task.is_subtask_overdue(self.subtasks[subtask_id]):
                         # to be scheduled task, should actually never happen
-                        print("Error: add_to_solver: non completed non scheduled task found")
+                        print("Error: add_to_solver: non-completed, non-scheduled task found")
                         exit()
                     elif Task.is_subtask_overdue(self.subtasks[subtask_id]):
                         # non completed and overdue task
                         # TODO: add correct overdue handling here
                         # if overdue behaviour is optional, the non completed task won't be scheduled anymore
                         if self.overdue_behaviour == 'optional':
+                            # TODO: add overdue behaviour optional
+                            scheduled_tasks += 1
+                            pass
+
+                        # if task is mandatory, the task has to be shifted forward, ignoring day constraints
+                        if self.overdue_behaviour == 'mandatory':
+                            # TODO: add overdue behaviour mandatory
+                            scheduled_tasks += 1
+                            pass
 
                         # if scheduling is in general, non overdue tasks can stay like they are
 
                         # if scheduling is after completion, all tasks have to be rescheduled according to the first overdue task
                         pass
-                    else:
-                        pass
+                    else: # scheduled task which is not overdue
+                        if scheduled_tasks == 0:
+                            # the first subtask is still not overdue -> all others will be fine as well
+                            return []
+                        if self.recurring['scheduling'] == 'in_general':
+                            # there was a subtask which has been rescheduled
+                            # for in general scheduling the other tasks can stay as they are
+                            scheduled_tasks += 1
+                            pass
+                        elif self.recurring['scheduling'] == 'after_completion':
+                            # tasks like this should be rescheduled
+                            # as they will be scheduled depending on the estimated first completion
+                            # TODO: add after completion scheduling for future tasks
+                            pass
                 else:
                     # new subtasks have to be created
-                    pass
+
+                    now = datetime.datetime.now()
+                    minimum = int((now-REFERENCE_TIME).total_seconds()/60)
+                    opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number))
+                    opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
+
+                    for constraint in self.constraints:
+                        constraint.add_constraint(solver=solver,
+                                                  time_opt_var=opt_start,
+                                                  duration_opt_var=opt_duration)
+
+                    # TODO: check for recurring datespan constraint and eventually stop the scheduling
+
+                    if scheduled_tasks == 0:
+                        # no reference task scheduled yet
+                        # TODO: add initial date constraint, either today or first day of range
+                        pass
+                    else:
+                        # already a task scheduled -> schedule the task depending on the last task
+                        if self.recurring['scheduling'] == 'in_general':
+                            # new subtask with in_general -> custom constraint depending on the last scheduled task
+                            # TODO: add constraint depending on last succesfully scheduled task
+                            pass
+                        elif self.recurring['scheduling'] == 'after_completion':
+                            # TODO: add constraint depending on last succesfully scheduled task
+                            pass
+
+                    optimization = {'start': opt_start,
+                                    'duration': opt_duration,
+                                    'task': self,
+                                    'subtask_number': 0}
+                    optimizations.append(optimization)
+                    task_number += 1
+                    scheduled_tasks += 1
+
                 subtask_id += 1
 
         else:
+            # TODO: add overdue behaviour for non recurring tasks
             if self.subtasks[0]['identifier'] is None and not self.subtasks[0]['completed']:
                 now = datetime.datetime.now()
                 minimum = int((now-REFERENCE_TIME).total_seconds()/60)
@@ -217,9 +273,11 @@ class Task:
                                 'task': self,
                                 'subtask_number': 0}
 
-                return [optimization]
+                optimizations.append(optimization)
             else:
-                return []
+                pass
+
+        return optimizations
 
 
     def __unicode__(self):
@@ -361,28 +419,6 @@ class TaskSpecifierParamType(click.ParamType):
         description = match.group("description")
         constraints = []
 
-        if match.group("end_day") is not None:
-            datespan_constraint = DatespanConstraint(int_or_none(match.group("start_day")),
-                                                     int_or_none(match.group("start_month")),
-                                                     int_or_none(match.group("start_year")),
-                                                     int_or_none(match.group("end_day")),
-                                                     int_or_none(match.group("end_month")),
-                                                     int_or_none(match.group("end_year")))
-            constraints.append(datespan_constraint)
-
-        duration_constraint = DurationConstraint(int_or_none(match.group("hours")),
-                                                 int_or_none(match.group("minutes")))
-        constraints.append(duration_constraint)
-
-        if match.group("end_hour") is not None:
-            timespan_constraint = TimespanConstraint(int_or_none(match.group("start_hour")),
-                                                     int_or_none(match.group("start_minute")),
-                                                     match.group("start_ampm"),
-                                                     int_or_none(match.group("end_hour")),
-                                                     int_or_none(match.group("end_minute")),
-                                                     match.group("end_ampm"))
-            constraints.append(timespan_constraint)
-
         if match.group("rep_kind") is not None:
             recurring = {}
             if match.group("rep_kind") == 'd' or match.group("rep_kind") == 'w':
@@ -442,6 +478,37 @@ class TaskSpecifierParamType(click.ParamType):
 
         else:
             recurring = None
+
+        if match.group("end_day") is not None:
+            datespan_constraint = DatespanConstraint(int_or_none(match.group("start_day")),
+                                                     int_or_none(match.group("start_month")),
+                                                     int_or_none(match.group("start_year")),
+                                                     int_or_none(match.group("end_day")),
+                                                     int_or_none(match.group("end_month")),
+                                                     int_or_none(match.group("end_year")))
+
+            # datespan strings will be interpreted differently depending if task is recurring or not
+            if recurring is None:
+                # task shall be scheduled once in this datespan
+                constraints.append(datespan_constraint)
+            else:
+
+                recurring['start_date'] = DatespanConstraint.start_date
+                recurring['end_date'] = DatespanConstraint.end_date
+
+
+        duration_constraint = DurationConstraint(int_or_none(match.group("hours")),
+                                                 int_or_none(match.group("minutes")))
+        constraints.append(duration_constraint)
+
+        if match.group("end_hour") is not None:
+            timespan_constraint = TimespanConstraint(int_or_none(match.group("start_hour")),
+                                                     int_or_none(match.group("start_minute")),
+                                                     match.group("start_ampm"),
+                                                     int_or_none(match.group("end_hour")),
+                                                     int_or_none(match.group("end_minute")),
+                                                     match.group("end_ampm"))
+            constraints.append(timespan_constraint)
 
         if match.group("overdue") is not None:
             overdue_behaviour = match.group("overdue")
