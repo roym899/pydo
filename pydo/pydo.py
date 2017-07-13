@@ -7,6 +7,7 @@ import yaml
 import click
 import types
 import regex
+import calendar
 from ortools.constraint_solver import pywrapcp
 
 from oauth2client.file import Storage
@@ -166,6 +167,54 @@ class Task:
             # 7 events for daily tasks, 2 are minimum for yearly tasks, monthly ~3
             number_of_tasks = int(round(-5*(1-pow(2, (-approx_days+1)/30))+7))
             return number_of_tasks
+
+    def get_next_schedule_date(self, previous_date):
+        """ Calculates the next date this task should be generated, none if no date follows the passed """
+        if not self.is_recurring():
+            if self.recurring['kind'] == 'month':
+                # after completion with a certain day a month scheduling (same for in general and after completion)
+                # -> start at start_date and search for a valid date
+                current_date = self.recurring['start_date']
+                current_year = current_date.year
+                current_month = current_date.month
+
+                while self.recurring['end_date'] is None or current_date < self.recurring['end_date']:
+                    if current_date > previous_date:
+                        return current_date
+
+                    current_month += self.recurring['amount']
+                    current_year += current_month // 12
+                    current_month = 1 if current_month % 12 == 0 else current_month % 12
+                    if self.recurring['date'] < 0:
+                        current_day = calendar.monthrange(current_year, current_month) + self.recurring['date'] + 1
+                    else:
+                        current_day = self.recurring['date']
+
+                    current_date = datetime.date(year=current_year, month=current_month, day=current_day)
+
+                return None
+
+            if self.recurring['kind'] == 'days':
+                if self.recurring['scheduling'] == 'in_general':
+                    current_date = self.recurring['start_date']
+                    while self.recurring['end_date'] is None or current_date < self.recurring['end_date']:
+                        if current_date > previous_date:
+                            return current_date
+
+                        current_date = current_date + datetime.timedelta(days = self.recurring['amount'])
+
+                    return None
+
+                if self.recurring['scheduling'] == 'after_completion':
+                    # just add the days to the previous date
+                    next_date = previous_date + datetime.timedelta(days = self.recurring['amount'])
+                    if self.recurring['end_date'] is not None and next_date > self.recurring['end_date']:
+                        return None
+                    else:
+                        return next_date
+
+        else:
+            return None
 
     def add_to_solver(self, solver, task_number):
         """Adds the task and its inherent constraints to the solver, returns object including the optimization
