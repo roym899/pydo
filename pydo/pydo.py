@@ -328,6 +328,9 @@ class Task:
 
         return optimizations
 
+    @staticmethod
+    def get_subtask_datetime(subtask):
+        return REFERENCE_TIME + datetime.timedelta(minutes=subtask['current_timestamp'])
 
     def __unicode__(self):
         return u'{description}: {current_timestamps} {current_durations} {completed} {identifier}'\
