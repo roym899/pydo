@@ -128,7 +128,6 @@ class Task:
         self.recurring = recurring
         self.overdue_behaviour = overdue_behaviour
 
-
     def is_recurring(self):
         if not self.recurring:
             return False
@@ -436,10 +435,9 @@ class TaskSpecifierParamType(click.ParamType):
     timespan_no_params = r"(( *(between *)?{time_no_params} *(and|-) *{time_no_params}))"
     long_duration = r"((?P<{days}>\d+)? *(?P<{kind}>d)(ay(s)?)?|(?P<{weeks}>\d+)? *(?P<{kind}>w)(eek(s)?)?|" \
                     r"(?P<{months}>\d+)? *(?P<{kind}>m)(onth(s)?)?|(?P<{years}>\d+)? *(?P<{kind}>y)(ear(s)?))?"\
-        .format(days="rep_days", weeks="rep_weeks", months="rep_months", years="rep_years", kind="rep_kind")
-    long_duration_no_params = r"((?:\d+)? *(?:d)(ay(s)?)?|(?:\d+)? *(?:w)(eek(s)?)?|" \
-                              r"(?:\d+)? *(?:m)(onth(s)?)?|(?:\d+)? *(?:y)(ear(s)?))?"\
         .format(days="rep_amount", weeks="rep_amount", months="rep_amount", years="rep_amount", kind="rep_kind")
+    long_duration_no_params = r"((?:\d+)? *(?:d)(ay(s)?)?|(?:\d+)? *(?:w)(eek(s)?)?|" \
+                              r"(?:\d+)? *(?:m)(onth(s)?)?|(?:\d+)? *(?:y)(ear(s)?))?"
     repetition = r"( *every *{long_duration}( *(?P<{scheduling}>after *completion|in *general))?)"\
         .format(long_duration=long_duration, scheduling="rep_scheduling")
     repetition_no_params = r"( *every *{long_duration_no_params}( *(?:after *completion|in *general))?)"\
@@ -461,8 +459,8 @@ class TaskSpecifierParamType(click.ParamType):
     def convert(self, value, param, ctx):
         try:
             match = TaskSpecifierParamType.re.fullmatch(value)
-            (description, constraints) = TaskSpecifierParamType.extract_match(match)
-            return Task(description, constraints)
+            (description, constraints, recurring, overdue_behaviour) = TaskSpecifierParamType.extract_match(match)
+            return Task(description, constraints, recurring, overdue_behaviour)
         except ValueError as ve:
             self.fail('%s is not a valid task specifier\n%s' % (value, ve.message))
 
@@ -570,14 +568,12 @@ class TaskSpecifierParamType(click.ParamType):
                 # task shall be scheduled once in this datespan
                 constraints.append(datespan_constraint)
             else:
-
-                recurring['start_date'] = DatespanConstraint.start_date
-                recurring['end_date'] = DatespanConstraint.end_date
+                recurring['start_date'] = datespan_constraint.start_date
+                recurring['end_date'] = datespan_constraint.end_date
         else:
             if recurring is not None:
                 recurring['start_date'] = datetime.datetime.today()
                 recurring['end_date'] = None
-
 
         duration_constraint = DurationConstraint(int_or_none(match.group("hours")),
                                                  int_or_none(match.group("minutes")))
