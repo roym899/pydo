@@ -169,7 +169,7 @@ class Task:
 
     def get_next_schedule_date(self, previous_date):
         """ Calculates the next date this task should be generated, none if no date follows the passed """
-        if not self.is_recurring():
+        if self.is_recurring():
             if self.recurring['kind'] == 'month':
                 # after completion with a certain day a month scheduling (same for in general and after completion)
                 # -> start at start_date and search for a valid date
@@ -227,7 +227,8 @@ class Task:
             minimum = int((now-REFERENCE_TIME).total_seconds()/60)
             scheduled_tasks = 0
             subtask_id = 0
-            while scheduled_tasks < self.to_be_scheduled_tasks():
+            to_be_scheduled_tasks = self.to_be_scheduled_tasks()
+            while scheduled_tasks < to_be_scheduled_tasks:
                 if subtask_id < len(self.subtasks):
                     # check already created subtasks
                     if self.subtasks[subtask_id]['completed']:
@@ -252,7 +253,7 @@ class Task:
                                             'task': self,
                                             'subtask_number': subtask_id}
                             optimizations.append(optimization)
-                            # TODO: proper handling of this
+                            # TODO: if not scheduled today following tasks will be off, better handling?
                             last_scheduled_date = datetime.date.today()
                             task_number += 1
                             scheduled_tasks += 1
@@ -281,6 +282,8 @@ class Task:
                                             'task': self,
                                             'subtask_number': subtask_id}
                             optimizations.append(optimization)
+
+                            self.subtasks.append()
                             last_scheduled_date = next_date
                             task_number += 1
                             scheduled_tasks += 1
@@ -324,6 +327,7 @@ class Task:
                                         'task': self,
                                         'subtask_number': subtask_id}
                         optimizations.append(optimization)
+                        self.subtasks.append({'identifier': None, 'completed': False, 'current_timestamp': None, 'current_duration': None})
                         last_scheduled_date = next_date
                         task_number += 1
                         scheduled_tasks += 1
@@ -889,4 +893,5 @@ def add(ctx, task):
 
 # start the actual program if the module is run by itself only
 if __name__ == '__main__':
-    pydo(obj={})
+    import sys
+    pydo(sys.argv[1:], obj={})
