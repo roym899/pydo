@@ -177,7 +177,7 @@ class Task:
                 current_year = current_date.year
                 current_month = current_date.month
 
-                while self.recurring['end_date'] is None or current_date < self.recurring['end_date']:
+                while self.recurring['end_date'] is None or current_date <= self.recurring['end_date']:
                     if current_date > previous_date:
                         return current_date
 
@@ -196,7 +196,7 @@ class Task:
             if self.recurring['kind'] == 'days':
                 if self.recurring['scheduling'] == 'in_general':
                     current_date = self.recurring['start_date']
-                    while self.recurring['end_date'] is None or current_date < self.recurring['end_date']:
+                    while self.recurring['end_date'] is None or current_date <= self.recurring['end_date']:
                         if current_date > previous_date:
                             return current_date
 
@@ -257,11 +257,15 @@ class Task:
                             last_scheduled_date = datetime.date.today()
                             task_number += 1
                             scheduled_tasks += 1
-                    else: # scheduled task which is not overdue
+                    else:  # scheduled task which is not overdue
                         if scheduled_tasks == 0:
                             # the first subtask is still not overdue -> all others will be fine as well
-                            return []
-                        if self.recurring['scheduling'] == 'in_general':
+                            # skip to the end of the subtasks and only add more tasks if necessary
+                            # TODO: check for right spacing (can be off if a task in the future has been deleted)
+                            last_scheduled_date = Task.get_subtask_datetime(self.subtasks[-1]).date()
+                            scheduled_tasks = len(self.subtasks) - subtask_id
+                            subtask_id = len(self.subtasks)-1
+                        elif self.recurring['scheduling'] == 'in_general':
                             # there was a subtask which has been rescheduled
                             # for in general scheduling the other tasks can stay as they are
                             last_scheduled_date = Task.get_subtask_datetime(self.subtasks[subtask_id]).date()
