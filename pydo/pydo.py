@@ -710,12 +710,15 @@ class Planner:
         # TODO: enforce some timelimit on the optimization
         solver.NewSearch(db)
 
-        solver.NextSolution()
+        success = solver.NextSolution()
 
-        for optimization in optimizations:
-            subtask_number = optimization['subtask_number']
-            optimization['task'].subtasks[subtask_number]['current_timestamp'] = optimization['start'].Value()
-            optimization['task'].subtasks[subtask_number]['current_duration'] = optimization['duration'].Value()
+        if success:
+            for optimization in optimizations:
+                subtask_number = optimization['subtask_number']
+                optimization['task'].subtasks[subtask_number]['current_timestamp'] = optimization['start'].Value()
+                optimization['task'].subtasks[subtask_number]['current_duration'] = optimization['duration'].Value()
+        else:
+            print("No solution found.")
 
         solver.EndSearch()
 
