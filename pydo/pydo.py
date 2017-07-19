@@ -542,7 +542,7 @@ class TaskSpecifierParamType(click.ParamType):
                 if match.group("rep_amount") is not None:
                     recurring['amount'] = int(match.group("rep_amount")) * multiplier
                 else:
-                    recurring['amound'] = 1
+                    recurring['amount'] = 1
             elif match.group("rep_kind") == 'm' or match.group("rep_kind") == "y":
                 # years and months are handled the same with year just being 12 months
                 # the difference to days is that month and year repetition bind to a date rather than a number of days
@@ -571,7 +571,7 @@ class TaskSpecifierParamType(click.ParamType):
                 if match.group("rep_amount") is not None:
                     recurring['amount'] = int(match.group("rep_amount")) * multiplier
                 else:
-                    recurring['amound'] = 1
+                    recurring['amount'] = 1
 
 
 
