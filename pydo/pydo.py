@@ -17,6 +17,7 @@ from apiclient import discovery
 
 
 REFERENCE_TIME = datetime.datetime(2000, 1, 1, 0, 0, 0)
+MAX_RELAXATION = 5
 
 
 def int_or_none(obj):
@@ -35,7 +36,7 @@ class Constraint:
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def add_constraint(self, solver, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, time_opt_var, duration_opt_var, relaxation):
         pass
 
 
@@ -58,13 +59,15 @@ class DatespanConstraint(Constraint):
         if self.start_date > self.end_date:
             raise ValueError("Startdate must be the same or before the Enddate")
 
-    def add_constraint(self, solver, time_opt_var, duration_opt_var):
-        start_stamp = int((datetime.datetime.combine(self.start_date, datetime.datetime.min.time())
+    def add_constraint(self, solver, time_opt_var, duration_opt_var, relaxation=0):
+        # add one day per 2 relaxation levels
+        added_days = datetime.timedelta(days=relaxation // 2)
+        start_stamp = int((datetime.datetime.combine(self.start_date-added_days, datetime.datetime.min.time())
                            - REFERENCE_TIME).total_seconds()/60)
-        end_stamp = int((datetime.datetime.combine(self.end_date, datetime.datetime.max.time())
+        end_stamp = int((datetime.datetime.combine(self.end_date+added_days, datetime.datetime.max.time())
                            - REFERENCE_TIME).total_seconds()/60)
-        solver.Add(time_opt_var + duration_opt_var <= end_stamp)
-        solver.Add(time_opt_var >= start_stamp)
+        solver.Add((time_opt_var + duration_opt_var <= end_stamp) + (time_opt_var == 0)*(duration_opt_var == 0) >= 1)
+        solver.Add((time_opt_var >= start_stamp) + (time_opt_var == 0)*(duration_opt_var == 0) >= 1)
 
 
 class TimespanConstraint(Constraint):
@@ -91,12 +94,19 @@ class TimespanConstraint(Constraint):
         if self.start_time >= self.end_time:
             raise ValueError("Starttime must be before the Enddate")
 
-    def add_constraint(self, solver, time_opt_var, duration_opt_var):
+    def add_constraint(self, solver, time_opt_var, duration_opt_var, relaxation=0):
         start_minutes = self.start_time.hour*60+self.start_time.minute
         end_minutes = self.end_time.hour*60+self.end_time.minute
-        solver.Add((time_opt_var + duration_opt_var) % 1440 <= end_minutes)
-        solver.Add(time_opt_var % 1440 >= start_minutes)
-        solver.Add(time_opt_var % 1440 < (time_opt_var + duration_opt_var) % 1440)
+        # relaxation, add one hour at start and end per relaxation level
+        start_minutes -= relaxation*60
+        if start_minutes < 0:
+            start_minutes = 0
+        end_minutes += relaxation*60
+        if start_minutes < 0:
+            end_minutes = 0
+        solver.Add(((time_opt_var + duration_opt_var) % 1440 <= end_minutes) + (time_opt_var == 0)*(duration_opt_var == 0) >= 1)
+        solver.Add((time_opt_var % 1440 >= start_minutes) + (time_opt_var == 0)*(duration_opt_var == 0) >= 1)
+        solver.Add((time_opt_var % 1440 < (time_opt_var + duration_opt_var) % 1440) + (time_opt_var == 0)*(duration_opt_var == 0) >= 1)
 
 
 class DurationConstraint(Constraint):
@@ -113,8 +123,8 @@ class DurationConstraint(Constraint):
         if self.minutes == 0:
             raise ValueError("Duration constraint not fully specified.")
 
-    def add_constraint(self, solver, time_opt_var, duration_opt_var):
-        solver.Add(duration_opt_var == self.minutes)
+    def add_constraint(self, solver, time_opt_var, duration_opt_var, relaxation=0):
+        solver.Add((duration_opt_var == self.minutes) + (time_opt_var == 0)*(duration_opt_var == 0) >= 1)
 
 
 class Task:
@@ -215,9 +225,12 @@ class Task:
         else:
             return None
 
-    def add_to_solver(self, solver, task_number):
+    def add_to_solver(self, solver, task_number, done_optimizations, relaxation):
         """Adds the task and its inherent constraints to the solver, returns object including the optimization
         variables"""
+
+        # TODO: skip done_optimizations
+
         optimizations = []
         if self.is_recurring():
             last_completed_date = None
@@ -229,6 +242,12 @@ class Task:
             subtask_id = 0
             to_be_scheduled_tasks = self.to_be_scheduled_tasks()
             while scheduled_tasks < to_be_scheduled_tasks:
+                # check if this task is already in the done_optimizations
+                if len([done_optimization for done_optimization in done_optimizations
+                        if done_optimization['task'] == self and done_optimization['subtask_number'] == subtask_id]) > 0:
+                    scheduled_tasks += 1
+                    task_number += 1
+                    continue
                 if subtask_id < len(self.subtasks):
                     # check already created subtasks
                     if self.subtasks[subtask_id]['completed']:
@@ -241,13 +260,14 @@ class Task:
                         # non completed and overdue task
                         # only if task is mandatory, the task has to be shifted forward, ignoring day constraints
                         if self.overdue_behaviour == 'mandatory':
-                            opt_start = solver.IntVar(minimum, minimum+1440000, "opt_start_{number}"
+                            opt_start = solver.IntVar(0, minimum+1440000, "opt_start_{number}"
                                                       .format(number=task_number))
                             opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
                             for constraint in self.constraints:
                                 constraint.add_constraint(solver=solver,
                                                           time_opt_var=opt_start,
-                                                          duration_opt_var=opt_duration)
+                                                          duration_opt_var=opt_duration,
+                                                          relaxation=relaxation)
                             optimization = {'start': opt_start,
                                             'duration': opt_duration,
                                             'task': self,
@@ -274,13 +294,14 @@ class Task:
                             # tasks like this should be rescheduled
                             # as they will be scheduled depending on the estimated first completion
                             next_date = self.get_next_schedule_date(last_scheduled_date)
-                            opt_start = solver.IntVar(minimum, minimum+1440000, "opt_start_{number}"
+                            opt_start = solver.IntVar(0, minimum+1440000, "opt_start_{number}"
                                                       .format(number=task_number))
                             opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
                             for constraint in self.constraints:
                                 constraint.add_constraint(solver=solver,
                                                           time_opt_var=opt_start,
-                                                          duration_opt_var=opt_duration)
+                                                          duration_opt_var=opt_duration,
+                                                          relaxation=relaxation)
                             optimization = {'start': opt_start,
                                             'duration': opt_duration,
                                             'task': self,
@@ -313,7 +334,7 @@ class Task:
                     # new task is then already overdue and should only be scheduled for mandatory tasks
                     if next_date is not None and (next_date > datetime.date.today() or
                                                   self.overdue_behaviour == 'mandatory'):
-                        opt_start = solver.IntVar(minimum, minimum+1440000, "opt_start_{number}"
+                        opt_start = solver.IntVar(0, minimum+1440000, "opt_start_{number}"
                                                   .format(number=task_number))
                         opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
                         if next_date > datetime.date.today():
@@ -321,11 +342,13 @@ class Task:
                                                next_date.day, next_date.month, next_date.year)\
                                 .add_constraint(solver=solver,
                                                 time_opt_var=opt_start,
-                                                duration_opt_var=opt_duration)
+                                                duration_opt_var=opt_duration,
+                                                relaxation=relaxation)
                         for constraint in self.constraints:
                             constraint.add_constraint(solver=solver,
                                                       time_opt_var=opt_start,
-                                                      duration_opt_var=opt_duration)
+                                                      duration_opt_var=opt_duration,
+                                                      relaxation=relaxation)
                         optimization = {'start': opt_start,
                                         'duration': opt_duration,
                                         'task': self,
@@ -341,14 +364,18 @@ class Task:
         else:
             # TODO: add overdue behaviour for non recurring tasks
             if self.subtasks[0]['identifier'] is None and not self.subtasks[0]['completed']:
+                if len([done_optimization for done_optimization in done_optimizations
+                        if done_optimization['task'] == self and done_optimization['subtask_number'] == 0]) > 0:
+                    return optimizations
                 now = datetime.datetime.now()
                 minimum = int((now-REFERENCE_TIME).total_seconds()/60)
-                opt_start = solver.IntVar(minimum, minimum+144000, "opt_start_{number}".format(number=task_number))
+                opt_start = solver.IntVar(0, minimum+144000, "opt_start_{number}".format(number=task_number))
                 opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
                 for constraint in self.constraints:
                     constraint.add_constraint(solver=solver,
                                               time_opt_var=opt_start,
-                                              duration_opt_var=opt_duration)
+                                              duration_opt_var=opt_duration,
+                                              relaxation=relaxation)
 
                 optimization = {'start': opt_start,
                                 'duration': opt_duration,
@@ -662,65 +689,108 @@ class Planner:
         self.plan_tasks()
 
         # add the tasks
+        # TODO: readd this when functionining optimization
         syncer.add_tasks(self.tasks)
 
-    def plan_tasks(self):
+    def plan_tasks(self, relaxation=0, done_optimizations=None):
         """Use constraint optimization to find possible configuration fulfilling every constraint"""
         solver = pywrapcp.Solver("task_optimization")
-        # minutes from now
+        if done_optimizations is None:
+            done_optimizations = []
         task_number = 0
-        opt_vars = []
         optimizations = []
+        opt_vars = []
         scheduled_subtasks = [subtask for task in self.tasks for subtask in task.subtasks
                               if subtask['identifier'] is not None]
 
         # set up the optimization problem
         for task in self.tasks:
-            new_optimizations = task.add_to_solver(solver, task_number)
+            new_optimizations = task.add_to_solver(solver, task_number, done_optimizations, relaxation)
 
             for optimization in new_optimizations:
                 # no overlap with events from google calendar
                 opt_start = optimization['start']
                 opt_duration = optimization['duration']
                 for event in self.events:
-                    solver.Add(solver.Max(opt_start + opt_duration <= event.start_timestamp(),
-                                          opt_start >= event.end_timestamp()) == 1)
+                    solver.Add((opt_start + opt_duration <= event.start_timestamp()) +
+                               (opt_start >= event.end_timestamp()) +
+                               ((opt_start == 0) * (opt_duration == 0)) >= 1)
 
                 # no overlaps with other to be optimized tasks
                 for prev_task_id in range(len(optimizations)):
-                    solver.Add(solver.Max(opt_start + opt_duration <= optimizations[prev_task_id]['start'],
-                                          opt_start >= optimizations[prev_task_id]['start'] +
-                                          optimizations[prev_task_id]['duration']) == 1)
+                    solver.Add((opt_start + opt_duration <= optimizations[prev_task_id]['start']) +
+                               (opt_start >= optimizations[prev_task_id]['start'] + optimizations[prev_task_id]['duration']) +
+                               ((opt_start == 0) * (opt_duration == 0)) >= 1)
 
                 # no overlaps with already scheduled tasks
                 for scheduled_subtask in scheduled_subtasks:
-                    solver.Add(solver.Max(opt_start + opt_duration <= scheduled_subtask['current_timestamp'],
-                                          opt_start >= scheduled_subtask['current_timestamp'] +
-                                          scheduled_subtask['current_duration']) == 1)
+                    solver.Add((opt_start + opt_duration <= scheduled_subtask['current_timestamp']) +
+                               (opt_start >= scheduled_subtask['current_timestamp'] + scheduled_subtask['current_duration']) +
+                               ((opt_start == 0) * (opt_duration == 0)) >= 1)
 
-                opt_vars += [opt_start, opt_duration]
+                # no overlaps with previous optimization runs
+                for done_optimization in done_optimizations:
+                    timestamp = done_optimization['task'].subtasks[done_optimization['subtask_number']]['current_timestamp']
+                    duration = done_optimization['task'].subtasks[done_optimization['subtask_number']]['current_duration']
+                    solver.Add((opt_start + opt_duration <= timestamp) +
+                               (opt_start >= timestamp + duration) +
+                               ((opt_start == 0) * (opt_duration == 0)) >= 1)
+
                 optimizations.append(optimization)
 
             task_number += len(new_optimizations)
 
-        # set the decision builder
-        db = solver.Phase(opt_vars, solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
+        if len(optimizations) != 0:
+            # solve the problem
+            # TODO: enforce some timelimit on the optimization
+            # see example at https://github.com/google/or-tools/blob/master/examples/python/steel.py
 
-        # solve the problem
-        # TODO: enforce some timelimit on the optimization
-        solver.NewSearch(db)
-
-        success = solver.NextSolution()
-
-        if success:
+            # first check which are schedulable without others
             for optimization in optimizations:
-                subtask_number = optimization['subtask_number']
-                optimization['task'].subtasks[subtask_number]['current_timestamp'] = optimization['start'].Value()
-                optimization['task'].subtasks[subtask_number]['current_duration'] = optimization['duration'].Value()
-        else:
-            print("No solution found.")
+                db = solver.Phase([optimization['start'], optimization['duration']], solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
+                solver.NewSearch(db)
+                optimization['schedulable'] = False
+                while solver.NextSolution():
+                    if optimization['start'].Value() != 0 and optimization['duration'].Value() != 0:
+                        optimization['schedulable'] = True
+                        break
+                solver.EndSearch()
 
-        solver.EndSearch()
+            # try to solve for these
+            schedulable_optimizations = [optimization for optimization in optimizations if optimization['schedulable']]
+            opt_vars = []
+            for optimization in schedulable_optimizations:
+                opt_vars.append(optimization['start'])
+                opt_vars.append(optimization['duration'])
+                solver.Add(optimization['start'] > 0)
+                solver.Add(optimization['duration'] > 0)
+
+            new_optimizations = []
+            if len(opt_vars) > 0:
+                db = solver.Phase(opt_vars, solver.CHOOSE_FIRST_UNBOUND, solver.ASSIGN_MIN_VALUE)
+                solver.NewSearch(db)
+                if solver.NextSolution():
+                    for optimization in schedulable_optimizations:
+                        if optimization['schedulable']:
+                            subtask_number = optimization['subtask_number']
+                            optimization['task'].subtasks[subtask_number]['current_timestamp'] = optimization['start'].Value()
+                            optimization['task'].subtasks[subtask_number]['current_duration'] = optimization['duration'].Value()
+                            new_optimizations.append(optimization)
+                    done_optimizations += new_optimizations
+                else:
+                    conflict = True
+                solver.EndSearch()
+
+            if relaxation >= MAX_RELAXATION:
+                # TODO: give some information about the non scheduled tasks
+                print("Some tasks could not be scheduled.")
+                return
+
+            # call recursively relaxing the problem with each step
+            self.plan_tasks(relaxation+1, done_optimizations)
+
+        else:
+            return
 
 
 class GoogleCalendarSync:
