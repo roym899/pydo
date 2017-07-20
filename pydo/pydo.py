@@ -268,6 +268,10 @@ class Task:
                                                           time_opt_var=opt_start,
                                                           duration_opt_var=opt_duration,
                                                           relaxation=relaxation)
+
+                            # has to start after right now
+                            solver.Add(minimum < opt_start)
+
                             optimization = {'start': opt_start,
                                             'duration': opt_duration,
                                             'task': self,
