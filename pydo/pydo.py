@@ -876,11 +876,12 @@ class GoogleCalendarSync:
         """Adds the passed task to google calendar"""
         for task in tasks:
             for subtask in task.subtasks:
-                # only add scheduled tasks
+                # only add scheduled tasks which are not overdue
                 if subtask['current_duration'] is None \
                         or subtask['current_timestamp'] is None \
                         or subtask['identifier'] is not None \
-                        or subtask['completed']:
+                        or subtask['completed'] \
+                        or Task.is_subtask_overdue(subtask):
                     continue
 
                 # get time object for the current task starting time
