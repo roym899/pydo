@@ -159,6 +159,9 @@ class Task:
     def add_id(self, identifier, subtask_number):
         self.subtasks[subtask_number]['identifier'] = identifier
 
+    def get_completed_subtasks(self):
+        return [subtask for subtask in self.subtasks if subtask['completed']]
+
     def to_be_scheduled_tasks(self):
         """Generates the number of tasks to be scheduled at any time"""
 
@@ -178,7 +181,7 @@ class Task:
             return number_of_tasks
 
     def get_next_schedule_date(self, previous_date):
-        """ Calculates the next date this task should be generated, none if no date follows the passed """
+        """ Calculates the next date this task should be generated, none if no date is suitable """
         if self.is_recurring():
             if self.recurring['kind'] == 'month':
                 # after completion with a certain day a month scheduling (same for in general and after completion)
@@ -225,29 +228,142 @@ class Task:
         else:
             return None
 
+
+    def get_nth_schedule_date(self, n):
+        """ Calculates the nth date this task should be generated starting from 1 and strom the start date,
+         returns none if no date is suitable """
+        if self.is_recurring():
+            # for mandatory tasks the next date only depends on the number of completed and scheduled subtasks
+            # no further params needed
+            counter = 0
+            previous_date = REFERENCE_TIME.date()
+            while counter <= n:
+                previous_date = self.get_next_schedule_date(previous_date)
+                counter += 1
+        else:
+            return None
+
     def add_to_solver(self, solver, task_number, done_optimizations, relaxation):
         """Adds the task and its inherent constraints to the solver, returns object including the optimization
         variables"""
-
-        # TODO: skip done_optimizations
-
         optimizations = []
         if self.is_recurring():
-            last_completed_date = None
-            last_scheduled_date = None
-            next_date = None
-            now = datetime.datetime.now()
-            minimum = int((now-REFERENCE_TIME).total_seconds()/60)
+            to_be_scheduled_tasks = self.to_be_scheduled_tasks()
             scheduled_tasks = 0
             subtask_id = 0
-            to_be_scheduled_tasks = self.to_be_scheduled_tasks()
+            now = datetime.datetime.now()
+            minimum = int((now-REFERENCE_TIME).total_seconds()/60)
+
+            if self.recurring['scheduling'] == 'after_completion':
+                reschedule = any([Task.is_subtask_overdue(subtask) for subtask in self.subtasks])
+            else:
+                reschedule = False
+
             while scheduled_tasks < to_be_scheduled_tasks:
-                # check if this task is already in the done_optimizations
+                to_be_scheduled = False
+                overdue = False
+
+                # check one subtaskid after another
+                # possible outcomes: already in optimized / does not exist yet / scheduled in the future / overdue / completed
+
+                # POSSIBILITY 0 check if this task is already in the done_optimizations
                 if len([done_optimization for done_optimization in done_optimizations
                         if done_optimization['task'] == self and done_optimization['subtask_number'] == subtask_id]) > 0:
                     scheduled_tasks += 1
                     task_number += 1
-                    continue
+                # POSSIBILITY 1 subtask does not exist yet
+                elif subtask_id >= len(self.subtasks):
+                    # set the next date
+                    to_be_scheduled = True
+                    scheduled_tasks += 1
+                # POSSIBILITY 2 task is scheduled in the future and not completed
+                elif not Task.is_subtask_overdue(self.subtasks[subtask_id]) and not self.subtasks[subtask_id]['completed']:
+                    # for after_completion tasks these have to be rescheduled only if at least one has been overdue
+                    if self.recurring['scheduling'] == 'after_completion':
+                        if reschedule:
+                            to_be_scheduled = True
+                        scheduled_tasks += 1
+                    elif self.recurring['scheduling'] == 'in_general':
+                        # can stay like it is
+                        scheduled_tasks += 1
+                    else:
+                        print("Error: Unknown scheduling type in add_to_solver")
+                # POSSIBILITY 3 task is overdue and not completed
+                elif Task.is_subtask_overdue(self.subtasks[subtask_id]) and not self.subtasks[subtask_id]['completed']:
+                    # only mandatory, overdue tasks shall be rescheduled
+                    if self.overdue_behaviour == 'mandatory':
+                        to_be_scheduled = True
+                        scheduled_tasks += 1
+                # POSSIBILITY 4 task is already marked as completed
+                elif self.subtasks[subtask_id]['completed']:
+                    pass
+                # POSSIBILITY 5 something i have not thought of has happened:
+                else:
+                    print("Error: add_to_solver ended up in POSSIBILITY 5")
+
+                # if this subtask has been set to be scheduled add it to the optimizer now
+                if to_be_scheduled:
+                    # TODO: check if task is still in calendar -> delete in that case
+                    next_date = None
+                    if self.recurring['scheduling'] == 'in_general' and self.overdue_behaviour == 'mandatory':
+                        pass
+                    elif self.recurring['scheduling'] == 'in_general' and self.overdue_behaviour == 'optional':
+                        pass
+                    elif self.recurring['scheduling'] == 'after_completion' and self.overdue_behaviour == 'mandatory':
+                        pass
+                    else:
+                        print("ERROR: unallowed combination of scheduling and overdue_behaviour")
+
+
+                    opt_start = solver.IntVar(0, minimum + 1440000, "opt_start_{number}"
+                                              .format(number=task_number))
+                    opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
+                    for constraint in self.constraints:
+                        constraint.add_constraint(solver=solver,
+                                                  time_opt_var=opt_start,
+                                                  duration_opt_var=opt_duration,
+                                                  relaxation=relaxation)
+
+                    # overdue tasks reaching this point will be rescheduled without a date constraint
+                    # otherwise the next date is calculated
+                    if next_date is not None and not overdue:
+                        if next_date > datetime.date.today():
+                            DatespanConstraint(next_date.day, next_date.month, next_date.year,
+                                               next_date.day, next_date.month, next_date.year) \
+                                .add_constraint(solver=solver,
+                                                time_opt_var=opt_start,
+                                                duration_opt_var=opt_duration,
+                                                relaxation=relaxation)
+
+                    # has to start after now
+                    solver.Add((minimum < opt_start ) + (opt_start == 0)*(opt_duration == 0) >= 1)
+
+                    optimization = {'start': opt_start,
+                                    'duration': opt_duration,
+                                    'task': self,
+                                    'subtask_number': subtask_id}
+                    optimizations.append(optimization)
+
+                    if subtask_id >= len(self.subtasks):
+                        self.subtasks.append({'identifier': None, 'completed': False,
+                                              'current_timestamp': None, 'current_duration': None})
+
+                subtask_id += 1
+
+
+
+
+
+
+
+
+
+
+
+            last_completed_date = None
+            last_scheduled_date = None
+            completed = len(self.get_completed_subtasks())
+            next_date = None
                 if subtask_id < len(self.subtasks):
                     # check already created subtasks
                     if self.subtasks[subtask_id]['completed']:
@@ -260,23 +376,6 @@ class Task:
                         # non completed and overdue task
                         # only if task is mandatory, the task has to be shifted forward, ignoring day constraints
                         if self.overdue_behaviour == 'mandatory':
-                            opt_start = solver.IntVar(0, minimum+1440000, "opt_start_{number}"
-                                                      .format(number=task_number))
-                            opt_duration = solver.IntVar(0, 1440, "opt_duration_{number}".format(number=task_number))
-                            for constraint in self.constraints:
-                                constraint.add_constraint(solver=solver,
-                                                          time_opt_var=opt_start,
-                                                          duration_opt_var=opt_duration,
-                                                          relaxation=relaxation)
-
-                            # has to start after right now
-                            solver.Add(minimum < opt_start)
-
-                            optimization = {'start': opt_start,
-                                            'duration': opt_duration,
-                                            'task': self,
-                                            'subtask_number': subtask_id}
-                            optimizations.append(optimization)
                             # TODO: if not scheduled today following tasks will be off, better handling?
                             last_scheduled_date = datetime.date.today()
                             task_number += 1
@@ -306,6 +405,13 @@ class Task:
                                                           time_opt_var=opt_start,
                                                           duration_opt_var=opt_duration,
                                                           relaxation=relaxation)
+                            if next_date > datetime.date.today():
+                                DatespanConstraint(next_date.day, next_date.month, next_date.year,
+                                                   next_date.day, next_date.month, next_date.year) \
+                                    .add_constraint(solver=solver,
+                                                    time_opt_var=opt_start,
+                                                    duration_opt_var=opt_duration,
+                                                    relaxation=relaxation)
                             optimization = {'start': opt_start,
                                             'duration': opt_duration,
                                             'task': self,
@@ -358,7 +464,6 @@ class Task:
                                         'task': self,
                                         'subtask_number': subtask_id}
                         optimizations.append(optimization)
-                        self.subtasks.append({'identifier': None, 'completed': False, 'current_timestamp': None, 'current_duration': None})
                         last_scheduled_date = next_date
                         task_number += 1
                         scheduled_tasks += 1
