@@ -270,7 +270,7 @@ class Task:
                                                           relaxation=relaxation)
 
                             # has to start after right now
-                            solver.Add(minimum < opt_start)
+                            solver.Add((minimum < opt_start) + ((opt_start == 0) * (opt_duration == 0)) >= 1)
 
                             optimization = {'start': opt_start,
                                             'duration': opt_duration,
@@ -287,8 +287,7 @@ class Task:
                             # skip to the end of the subtasks and only add more tasks if necessary
                             # TODO: check for right spacing (can be off if a task in the future has been deleted)
                             last_scheduled_date = Task.get_subtask_datetime(self.subtasks[-1]).date()
-                            scheduled_tasks = len(self.subtasks) - subtask_id
-                            subtask_id = len(self.subtasks)-1
+                            scheduled_tasks += 1
                         elif self.recurring['scheduling'] == 'in_general':
                             # there was a subtask which has been rescheduled
                             # for in general scheduling the other tasks can stay as they are
@@ -312,7 +311,6 @@ class Task:
                                             'subtask_number': subtask_id}
                             optimizations.append(optimization)
 
-                            self.subtasks.append()
                             last_scheduled_date = next_date
                             task_number += 1
                             scheduled_tasks += 1
